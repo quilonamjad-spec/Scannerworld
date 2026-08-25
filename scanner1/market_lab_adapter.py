@@ -161,19 +161,29 @@ def _find_pipeline_function():
     """
     Locate Scanner One's existing pipeline function.
 
-    We import the existing scanner module rather than copying its logic.
+    Scanner One's internal modules use direct imports such as:
+        from config import ...
+        from data import ...
+    
+    Therefore scanner1/ must temporarily be on sys.path when
+    Market Lab imports the adapter from the repository root.
     """
+    import sys
+    from pathlib import Path
+
+    scanner_dir = Path(__file__).resolve().parent
+
+    if str(scanner_dir) not in sys.path:
+        sys.path.insert(0, str(scanner_dir))
 
     try:
         from scan_pipeline import run_scan_pipeline
-
         return run_scan_pipeline
 
     except ImportError as exc:
         raise ImportError(
             "Could not import Scanner One's scan_pipeline.py. "
-            "Make sure market_lab_adapter.py is inside scanner1/"
-            "and that the existing Scanner One modules are present."
+            f"Original error: {exc}"
         ) from exc
 
 
