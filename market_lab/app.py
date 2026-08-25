@@ -60,7 +60,7 @@ def run_isolated_test(script_name):
 
 
 scanner1 = run_isolated_test(
-    "market_lab_test.py"
+    "market_lab_scanner1_test.py"
 )
 
 scanner2 = run_isolated_test(
@@ -137,13 +137,12 @@ if run_button:
     # --------------------------------------------------------
     # SCANNER 1
     # --------------------------------------------------------
-
     with st.spinner("Running Scanner 1..."):
-        scanner1 = run_scanner1(
-            symbols=SYMBOLS,
-            as_of=AS_OF,
+        scanner1 = run_isolated_test(
+            "market_lab_scanner1_test.py"
         )
 
+    
     progress.progress(25)
 
     # --------------------------------------------------------
@@ -151,12 +150,8 @@ if run_button:
     # --------------------------------------------------------
 
     with st.spinner("Running Scanner 2..."):
-        scanner2 = run_scanner2(
-            symbols=SYMBOLS,
-            as_of=AS_OF,
-            interval="5m",
-            period="5d",
-            batch_size=2,
+        scanner2 = run_isolated_test(
+            "market_lab_scanner2_test.py"
         )
 
     progress.progress(50)
@@ -166,10 +161,8 @@ if run_button:
     # --------------------------------------------------------
 
     with st.spinner("Running Scanner 3..."):
-        scanner3 = run_scanner3(
-            symbols=SYMBOLS,
-            as_of=AS_OF,
-            interval="5m",
+        scanner3 = run_isolated_test(
+           "market_lab_scanner3_test.py"
         )
 
     progress.progress(75)
@@ -179,13 +172,10 @@ if run_button:
     # --------------------------------------------------------
 
     with st.spinner("Running Scanner 4..."):
-        scanner4 = run_scanner4(
-            symbols=SYMBOLS,
-            as_of=AS_OF,
-            period_days=5,
-            smooth=True,
-            chart_lookback=60,
-        )
+       scanner4 = run_isolated_test(
+          "market_lab_scanner4_test.py"
+       )
+ 
 
     progress.progress(100)
 
