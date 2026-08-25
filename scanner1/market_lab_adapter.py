@@ -233,8 +233,9 @@ def run_market_lab_scan(
     result = run_scan_pipeline(
         clean_symbols,
         as_of=timestamp,
-        lookback=lookback,
+        lookback_days=lookback,
         batch_size=batch_size,
+        show_progress=False,
     )
 
     records = _records_from_result(result)
