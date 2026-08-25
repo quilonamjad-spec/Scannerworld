@@ -40,17 +40,21 @@ from typing import Any, Iterable
 
 
 def _normalise_timestamp(as_of: Any) -> datetime:
-    """Convert common timestamp inputs into a datetime."""
+    """Convert common timestamp inputs into a timezone-aware IST datetime."""
+
+    from zoneinfo import ZoneInfo
+
+    IST = ZoneInfo("Asia/Kolkata")
+
     if isinstance(as_of, datetime):
-        return as_of
+        dt = as_of
 
-    if hasattr(as_of, "to_pydatetime"):
-        return as_of.to_pydatetime()
+    elif hasattr(as_of, "to_pydatetime"):
+        dt = as_of.to_pydatetime()
 
-    if isinstance(as_of, str):
+    elif isinstance(as_of, str):
         value = as_of.strip()
 
-        # Support the timestamp format used by Market Lab.
         for fmt in (
             "%Y-%m-%d %H:%M",
             "%Y-%m-%d %H:%M:%S",
@@ -58,14 +62,37 @@ def _normalise_timestamp(as_of: Any) -> datetime:
             "%Y-%m-%dT%H:%M:%S",
         ):
             try:
-                return datetime.strptime(value, fmt)
+                dt = datetime.strptime(value, fmt)
+                break
             except ValueError:
-                pass
+                dt = None
+        else:
+            dt = None
 
-    raise ValueError(
-        "Invalid as_of timestamp. "
-        "Use datetime or 'YYYY-MM-DD HH:MM'."
-    )
+        if dt is None:
+            raise ValueError(
+                "Invalid as_of timestamp. "
+                "Use datetime or 'YYYY-MM-DD HH:MM'."
+            )
+
+    else:
+        raise ValueError(
+            "Invalid as_of timestamp. "
+            "Use datetime or 'YYYY-MM-DD HH:MM'."
+        )
+
+    # --------------------------------------------------------
+    # Scanner 1 data is timezone-aware IST.
+    # If Market Lab supplied a naive timestamp, interpret it
+    # as IST rather than leaving it timezone-naive.
+    # --------------------------------------------------------
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=IST)
+    else:
+        dt = dt.astimezone(IST)
+
+    return dt
 
 
 def _json_safe(value: Any) -> Any:
