@@ -7,6 +7,7 @@ from datetime import datetime, date, time
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+
 from grid_analysis import render_grid_analysis
 
 
@@ -1237,65 +1238,20 @@ if run_button:
         for r in scanner4.get("results", [])
         if "Error" not in r
     }
+
     # ========================================================
-    # GRID ANALYSIS
-    # ========================================================
-
-    if analysis_mode == "Grid Analysis":
-
-        grid_stocks = []
-
-        for symbol in SYMBOLS:
-
-            r1 = s1.get(symbol, {})
-            r2 = s2.get(symbol, {})
-            r3 = s3.get(symbol, {})
-            r4 = s4.get(symbol, {})
-
-            grid_stocks.append(
-                {
-                    "symbol": symbol,
-                    "directions": [
-                        normalize_direction(1, r1),
-                        normalize_direction(2, r2),
-                        normalize_direction(3, r3),
-                        normalize_direction(4, r4),
-                    ],
-                }
-            )
-
-        render_grid_analysis(
-            symbols=grid_stocks,
-            scanner1=s1,
-            scanner2=s2,
-            scanner3=s3,
-            scanner4=s4,
-        )
-
-        st.stop()
-    # ========================================================
-    # STOCK RESULTS
+    # STOCK SELECTOR WORKSPACE
     # ========================================================
 
-    for symbol in SYMBOLS:
+    def render_stock_workspace(symbol, r1, r2, r3, r4):
+        """Render the existing full stock-level Market Lab workspace."""
 
         st.divider()
-
         st.header(symbol)
-
-        # ----------------------------------------------------
-        # Get scanner results
-        # ----------------------------------------------------
-
-        r1 = s1.get(symbol, {})
-        r2 = s2.get(symbol, {})
-        r3 = s3.get(symbol, {})
-        r4 = s4.get(symbol, {})
 
         # ====================================================
         # MACHINE READING
         # ====================================================
-
         st.markdown("### 🧠 Machine Reading")
 
         reading = build_machine_reading(
@@ -1307,11 +1263,10 @@ if run_button:
         )
 
         st.info(reading)
-        
-        # ========================================================
-        # CHART READING
-        # ========================================================
 
+        # ====================================================
+        # CHART READING
+        # ====================================================
         st.markdown("### 📈 Chart Reading")
 
         chart_data = r3.get("Chart") if r3 else None
@@ -1322,19 +1277,15 @@ if run_button:
             st.warning(
                 "Scanner 3 chart data is not available for this stock."
             )
-            
+
         # ====================================================
         # UNDERLYING DATA
         # ====================================================
-
         with st.expander(
             f"🔎 Underlying Scanner Data — {symbol}",
             expanded=False,
         ):
-
-            st.markdown(
-                "#### Four-Scanner Comparison"
-            )
+            st.markdown("#### Four-Scanner Comparison")
 
             comparison_df = build_underlying_table(
                 r1,
@@ -1348,9 +1299,7 @@ if run_button:
                 use_container_width=True,
             )
 
-            st.markdown(
-                "#### Native Scanner Output"
-            )
+            st.markdown("#### Native Scanner Output")
 
             tab1, tab2, tab3, tab4 = st.tabs(
                 [
@@ -1373,6 +1322,28 @@ if run_button:
             with tab4:
                 st.json(r4)
 
+    # ========================================================
+    # RESULTS DISPLAY
+    # ========================================================
+
+    if analysis_mode == "Grid Analysis":
+        render_grid_analysis(
+            symbols=SYMBOLS,
+            s1=s1,
+            s2=s2,
+            s3=s3,
+            s4=s4,
+            render_workspace=render_stock_workspace,
+        )
+    else:
+        for symbol in SYMBOLS:
+            render_stock_workspace(
+                symbol=symbol,
+                r1=s1.get(symbol, {}),
+                r2=s2.get(symbol, {}),
+                r3=s3.get(symbol, {}),
+                r4=s4.get(symbol, {}),
+            )
 
     # ========================================================
     # FOOTER
@@ -1381,8 +1352,7 @@ if run_button:
     st.divider()
 
     st.caption(
-        "Market Lab currently observes and explains the "
-        "four scanner outputs. No consensus score, ranking, "
-        "BUY/SELL decision, or additional trading logic "
-        "is applied."
+        "Market Lab observes and presents the four existing scanner outputs. "
+        "Grid Analysis is presentation-only; no new score, weighting, "
+        "BUY/SELL decision, or additional trading logic is applied."
     )
