@@ -1128,8 +1128,8 @@ with col2:
 
 with col3:
     st.info(
-        "**Engines**\n\n"
-        "4 scanners"
+        "**Analysis Mode**\n\n"
+        + analysis_mode
     )
 
 
