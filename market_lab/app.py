@@ -31,11 +31,24 @@ st.caption("Four Scanner Intelligence Layer — Machine Reading")
 
 
 # ============================================================
+# ANALYSIS MODE
+# ============================================================
+
+st.subheader("Analysis Mode")
+
+analysis_mode = st.radio(
+    "Choose how you want to view the analysis",
+    [
+        "Stock Selector",
+        "Grid Analysis",
+    ],
+    horizontal=True,
+    index=0,
+)
+
+# ============================================================
 # TEST CONFIGURATION
 # ============================================================
-# ------------------------------------------------------------
-# TEST CONFIGURATION
-# ------------------------------------------------------------
 
 st.subheader("Test Configuration")
 
