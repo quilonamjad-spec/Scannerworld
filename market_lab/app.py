@@ -81,19 +81,28 @@ st.caption(
 # RUN ONE SCANNER IN ITS OWN PROCESS
 # ============================================================
 
-def run_isolated_test(script_name):
+def run_isolated_test(script_name, symbols, as_of):
     """
-    Run one scanner diagnostic in its own Python process.
+    Run one scanner in its own Python process while passing the
+    Market Lab UI configuration explicitly to the child process.
 
-    Each scanner keeps its own module namespace, preventing
-    generic files such as indicators.py, config.py, etc.
-    from colliding between scanners.
+    The scanner test scripts remain generic runners; they do not
+    contain a hardcoded stock universe or replay timestamp.
     """
 
     script_path = ROOT_DIR / script_name
 
+    command = [
+        sys.executable,
+        str(script_path),
+        "--symbols",
+        ",".join(symbols),
+        "--as-of",
+        as_of.strftime("%Y-%m-%d %H:%M"),
+    ]
+
     result = subprocess.run(
-        [sys.executable, str(script_path)],
+        command,
         cwd=str(ROOT_DIR),
         capture_output=True,
         text=True,
@@ -948,13 +957,13 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.info(
         "**Universe**\n\n"
-        "ADANIPOWER · TCS"
+        + (" · ".join(SYMBOLS) if SYMBOLS else "—")
     )
 
 with col2:
     st.info(
         "**As-of**\n\n"
-        "21-Aug-2026 · 13:55"
+        + AS_OF.strftime("%d-%b-%Y · %H:%M")
     )
 
 with col3:
@@ -992,7 +1001,9 @@ if run_button:
 
     with st.spinner("Running Scanner 1..."):
         scanner1 = run_isolated_test(
-            "market_lab_scanner1_test.py"
+            "market_lab_scanner1_test.py",
+            SYMBOLS,
+            AS_OF,
         )
 
     progress.progress(25)
@@ -1003,7 +1014,9 @@ if run_button:
 
     with st.spinner("Running Scanner 2..."):
         scanner2 = run_isolated_test(
-            "market_lab_scanner2_test.py"
+            "market_lab_scanner2_test.py",
+            SYMBOLS,
+            AS_OF,
         )
 
     progress.progress(50)
@@ -1014,7 +1027,9 @@ if run_button:
 
     with st.spinner("Running Scanner 3..."):
         scanner3 = run_isolated_test(
-            "market_lab_scanner3_test.py"
+            "market_lab_scanner3_test.py",
+            SYMBOLS,
+            AS_OF,
         )
 
     progress.progress(75)
@@ -1025,7 +1040,9 @@ if run_button:
 
     with st.spinner("Running Scanner 4..."):
         scanner4 = run_isolated_test(
-            "market_lab_scanner4_test.py"
+            "market_lab_scanner4_test.py",
+            SYMBOLS,
+            AS_OF,
         )
 
     progress.progress(100)
