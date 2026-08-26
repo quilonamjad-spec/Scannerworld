@@ -24,8 +24,9 @@ Where s1..s4 are dictionaries indexed by symbol, exactly as the
 Market Lab app already builds them.
 """
 
+from __future__ import annotations
+
 from typing import Callable, Dict, Mapping, Optional, Sequence, Any
-from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
@@ -463,18 +464,18 @@ def _render_stock_card(
     }[bias]
 
     st.markdown(
-        dedent(f"""
-            <div class="ml-card">
-                <div class="ml-card-title">{symbol}</div>
+        f"""
+        <div class="ml-card">
+            <div class="ml-card-title">{symbol}</div>
 
-                <div class="ml-header-row">
-                    <div class="ml-header-label"></div>
-                    <div class="ml-head">Score</div>
-                    <div class="ml-head">VOL / RSI</div>
-                    <div class="ml-head">Confidence / Consensus</div>
-                    <div class="ml-head">Direction</div>
-                </div>
-            """),
+            <div class="ml-header-row">
+                <div class="ml-header-label"></div>
+                <div class="ml-head">Score</div>
+                <div class="ml-head">VOL / RSI</div>
+                <div class="ml-head">Confidence / Consensus</div>
+                <div class="ml-head">Direction</div>
+            </div>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -518,45 +519,45 @@ def _render_stock_card(
             confidence_html = '<div class="ml-blank"></div>'
 
         st.markdown(
-            dedent(f"""
-                <div class="ml-scanner-row">
-                    <div class="ml-scanner-name">{scanner_name}</div>
+            f"""
+            <div class="ml-scanner-row">
+                <div class="ml-scanner-name">{scanner_name}</div>
 
-                    <div class="ml-score-cell">
-                        <div class="ml-score">
-                            {score if score else " "}
-                        </div>
-                        <div class="ml-score-line">
-                            <span style="width:0%;"></span>
-                        </div>
+                <div class="ml-score-cell">
+                    <div class="ml-score">
+                        {score if score else " "}
                     </div>
-
-                    <div class="ml-vol-cell">
-                        {vol_rsi_html}
-                    </div>
-
-                    <div class="ml-confidence-cell">
-                        {confidence_html}
-                    </div>
-
-                    <div class="ml-direction"
-                        style="color:{direction_color};">
-                        {_direction_dot(direction)}
-                        {direction}
+                    <div class="ml-score-line">
+                        <span style="width:0%;"></span>
                     </div>
                 </div>
-                """),
+
+                <div class="ml-vol-cell">
+                    {vol_rsi_html}
+                </div>
+
+                <div class="ml-confidence-cell">
+                    {confidence_html}
+                </div>
+
+                <div class="ml-direction"
+                     style="color:{direction_color};">
+                    {_direction_dot(direction)}
+                    {direction}
+                </div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
     st.markdown(
-        dedent(f"""
-            <div class="ml-bias-row">
-                <span>Scanner Direction Summary</span>
-                <strong style="color:{bias_color};">{bias}</strong>
-            </div>
-            """),
-             unsafe_allow_html=True,
+        f"""
+        <div class="ml-bias-row">
+            <span>Scanner Direction Summary</span>
+            <strong style="color:{bias_color};">{bias}</strong>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     chart_data = _get_chart(r3)
