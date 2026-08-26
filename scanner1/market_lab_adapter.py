@@ -10,20 +10,27 @@ IMPORTANT:
 Purpose:
     Give Market Lab a clean, structured interface to Scanner One.
 
-Flow:
-    Market Lab
-        ↓
-    Scanner One Stage 1
-        ↓
-    Existing Quality Gate
-        ↓
-    Existing Ranking
-        ↓
-    Market Lab
+Input:
+    symbols
+    as_of
+    lookback
+    batch_size
 
-The adapter does not calculate a new score.
-It exposes the Rank / Rank Score already produced by Scanner One's
-existing gate_rank.py logic.
+Output:
+    JSON-serialisable dictionary containing:
+        - scan timestamp
+        - number scanned
+        - candidates
+        - ranked results
+
+Usage from Python:
+
+    from market_lab_adapter import run_market_lab_scan
+
+    result = run_market_lab_scan(
+        symbols=["INFY.NS", "TCS.NS"],
+        as_of="2026-08-21 13:55",
+    )
 """
 
 from __future__ import annotations
@@ -31,10 +38,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Iterable
 
-
-# --------------------------------------------------------------------------
-# Timestamp handling
-# --------------------------------------------------------------------------
 
 def _normalise_timestamp(as_of: Any) -> datetime:
     """Convert common timestamp inputs into a timezone-aware IST datetime."""
@@ -78,8 +81,12 @@ def _normalise_timestamp(as_of: Any) -> datetime:
             "Use datetime or 'YYYY-MM-DD HH:MM'."
         )
 
-    # Scanner One data is timezone-aware IST.
-    # Interpret naive timestamps as IST.
+    # --------------------------------------------------------
+    # Scanner 1 data is timezone-aware IST.
+    # If Market Lab supplied a naive timestamp, interpret it
+    # as IST rather than leaving it timezone-naive.
+    # --------------------------------------------------------
+
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=IST)
     else:
@@ -88,17 +95,13 @@ def _normalise_timestamp(as_of: Any) -> datetime:
     return dt
 
 
-# --------------------------------------------------------------------------
-# JSON conversion
-# --------------------------------------------------------------------------
-
 def _json_safe(value: Any) -> Any:
     """Convert common pandas/numpy values into JSON-safe Python values."""
 
     if value is None:
         return None
 
-    # pandas Timestamp / datetime-like
+    # pandas Timestamp
     if hasattr(value, "isoformat"):
         try:
             return value.isoformat()
@@ -126,17 +129,13 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-# --------------------------------------------------------------------------
-# DataFrame / result conversion
-# --------------------------------------------------------------------------
-
 def _records_from_result(result: Any) -> list[dict]:
     """
-    Convert a Scanner One result into a list of dictionaries.
+    Convert the Scanner One result into a list of dictionaries.
 
-    The scanner normally returns a pandas DataFrame.
-    This remains tolerant of list/dict results so the adapter does not
-    unnecessarily constrain the underlying scanner.
+    The scanner may return a pandas DataFrame or a list-like structure.
+    We deliberately keep this adapter tolerant so the underlying scanner
+    does not need to be rewritten.
     """
 
     if result is None:
@@ -146,7 +145,6 @@ def _records_from_result(result: Any) -> list[dict]:
     if hasattr(result, "to_dict"):
         try:
             records = result.to_dict(orient="records")
-
             return [
                 {
                     str(k): _json_safe(v)
@@ -154,7 +152,6 @@ def _records_from_result(result: Any) -> list[dict]:
                 }
                 for record in records
             ]
-
         except TypeError:
             pass
 
@@ -171,11 +168,7 @@ def _records_from_result(result: Any) -> list[dict]:
                     }
                 )
             else:
-                output.append(
-                    {
-                        "value": _json_safe(item)
-                    }
-                )
+                output.append({"value": _json_safe(item)})
 
         return output
 
@@ -188,32 +181,20 @@ def _records_from_result(result: Any) -> list[dict]:
             }
         ]
 
-    return [
-        {
-            "value": _json_safe(result)
-        }
-    ]
+    return [{"value": _json_safe(result)}]
 
 
-# --------------------------------------------------------------------------
-# Scanner One imports
-# --------------------------------------------------------------------------
-
-def _find_scanner_functions():
+def _find_pipeline_function():
     """
-    Locate Scanner One's existing pipeline, quality gate and ranking
-    functions.
+    Locate Scanner One's existing pipeline function.
 
     Scanner One's internal modules use direct imports such as:
-
         from config import ...
         from data import ...
-        from gate_rank import ...
-
-    Therefore scanner1/ must temporarily be on sys.path when Market Lab
-    imports this adapter from the repository root.
+    
+    Therefore scanner1/ must temporarily be on sys.path when
+    Market Lab imports the adapter from the repository root.
     """
-
     import sys
     from pathlib import Path
 
@@ -224,26 +205,14 @@ def _find_scanner_functions():
 
     try:
         from scan_pipeline import run_scan_pipeline
-        from gate_rank import quality_gate, rank_results
-        from config import DEFAULT_WEIGHTS
-
-        return (
-            run_scan_pipeline,
-            quality_gate,
-            rank_results,
-            DEFAULT_WEIGHTS,
-        )
+        return run_scan_pipeline
 
     except ImportError as exc:
         raise ImportError(
-            "Could not import Scanner One's existing pipeline/gate/ranking "
-            f"modules. Original error: {exc}"
+            "Could not import Scanner One's scan_pipeline.py. "
+            f"Original error: {exc}"
         ) from exc
 
-
-# --------------------------------------------------------------------------
-# Market Lab entry point
-# --------------------------------------------------------------------------
 
 def run_market_lab_scan(
     symbols: Iterable[str],
@@ -257,19 +226,15 @@ def run_market_lab_scan(
     Parameters
     ----------
     symbols:
-        Iterable of ticker symbols, for example:
-
-            ["INFY", "TCS", "RELIANCE"]
-
-        Market Lab uses bare NSE symbols.
+        Iterable of ticker symbols, e.g.
+        ["INFY.NS", "TCS.NS", "RELIANCE.NS"]
 
     as_of:
         datetime or string such as:
-
-            "2026-08-21 13:55"
+        "2026-08-21 13:55"
 
     lookback:
-        Historical lookback value passed to Scanner One.
+        Number of historical candles required by Scanner One.
 
     batch_size:
         Existing Scanner One batch size.
@@ -277,36 +242,18 @@ def run_market_lab_scan(
     Returns
     -------
     dict
-        JSON-serialisable Market Lab result containing:
-
-        - Stage 1 results
-        - Quality Gate rejected results
-        - Quality Gate passed/ranked results
-        - existing Rank
-        - existing Rank Score
+        JSON-serialisable Market Lab result.
     """
 
     timestamp = _normalise_timestamp(as_of)
 
-    # ------------------------------------------------------------------
-    # Market Lab uses bare NSE symbols:
-    #
-    #     ADANIPOWER
-    #     TCS
-    #
-    # Scanner One's existing pipeline expects Yahoo/NSE symbols:
-    #
-    #     ADANIPOWER.NS
-    #     TCS.NS
-    #
-    # Normalize only at this integration boundary.
-    # ------------------------------------------------------------------
-
+    # Market Lab uses bare NSE symbols (e.g. ADANIPOWER), while
+    # Scanner One's existing pipeline expects Yahoo/NSE symbols with
+    # the .NS suffix. Keep the UI generic, but normalize only at this
+    # Scanner One integration boundary.
     clean_symbols = []
-
     for symbol in symbols:
         value = str(symbol).strip().upper()
-
         if not value:
             continue
 
@@ -323,30 +270,14 @@ def run_market_lab_scan(
             "as_of": timestamp.isoformat(),
             "symbols_requested": 0,
             "results": [],
-            "ranked_results": [],
-            "rejected_results": [],
         }
 
-    # ------------------------------------------------------------------
-    # Load Scanner One's EXISTING functions.
-    #
-    # No Scanner One calculation is duplicated here.
-    # ------------------------------------------------------------------
+    run_scan_pipeline = _find_pipeline_function()
 
-    (
-        run_scan_pipeline,
-        quality_gate,
-        rank_results,
-        default_weights,
-    ) = _find_scanner_functions()
-
-    # ------------------------------------------------------------------
-    # STAGE 1
-    #
-    # This is Scanner One's existing Stage-1 pipeline.
-    # ------------------------------------------------------------------
-
-    stage1_result = run_scan_pipeline(
+    # IMPORTANT:
+    # We call Scanner One's existing pipeline.
+    # No indicator or ranking logic is duplicated here.
+    result = run_scan_pipeline(
         clean_symbols,
         as_of=timestamp,
         lookback_days=lookback,
@@ -354,152 +285,47 @@ def run_market_lab_scan(
         show_progress=False,
     )
 
-    # Keep the original Stage-1 result exactly as Scanner One produced it.
-    stage1_records = _records_from_result(stage1_result)
+    records = _records_from_result(result)
 
-    # ------------------------------------------------------------------
-    # QUALITY GATE
-    #
-    # These are the existing default gate values used by Scanner One's
-    # own app when the user has not changed the sidebar settings.
-    #
-    # We are NOT creating new gate logic.
-    # We are simply calling Scanner One's existing quality_gate().
-    # ------------------------------------------------------------------
-
-    gate_params = {
-        "max_extension_atr": 2.5,
-        "max_consecutive_bars": 6,
-        "rsi_bull_min": 50,
-        "rsi_bull_max": 78,
-    }
-
-    passed_df, rejected_df = quality_gate(
-        stage1_result,
-        gate_params,
-    )
-
-    # ------------------------------------------------------------------
-    # RANKING
-    #
-    # This is Scanner One's EXISTING rank_results().
-    #
-    # We do not calculate Rank Score ourselves.
-    # Rank Score comes directly from Scanner One.
-    # ------------------------------------------------------------------
-
-    if passed_df.empty:
-        ranked_df = passed_df.copy()
-    else:
-        ranked_df = rank_results(
-            passed_df,
-            default_weights,
-        )
-
-    ranked_records = _records_from_result(ranked_df)
-    rejected_records = _records_from_result(rejected_df)
-
-    # ------------------------------------------------------------------
-    # Normalize Symbol back to Market Lab's bare-symbol format.
-    #
-    # Scanner One may return:
-    #
-    #     ADANIPOWER.NS
-    #
-    # Market Lab indexes:
-    #
-    #     ADANIPOWER
-    #
-    # This changes only the display/index key, not Scanner One's logic.
-    # ------------------------------------------------------------------
-
-    def normalize_market_lab_symbol(record: dict) -> None:
-        if not isinstance(record, dict):
-            return
-
-        symbol = record.get("Symbol")
-
-        if not symbol:
-            return
-
-        record["Symbol"] = (
-            str(symbol)
-            .strip()
-            .upper()
-            .removesuffix(".NS")
-            .removesuffix(".BO")
-        )
-
-    for record in stage1_records:
-        normalize_market_lab_symbol(record)
-
-    for record in ranked_records:
-        normalize_market_lab_symbol(record)
-
-    for record in rejected_records:
-        normalize_market_lab_symbol(record)
-
-    # ------------------------------------------------------------------
-    # RETURN
-    #
-    # "results" remains the original Stage-1 output.
-    #
-    # "ranked_results" contains Scanner One's EXISTING ranking output,
-    # including:
-    #
-    #     Rank
-    #     Rank Score
-    #
-    # No new score is created here.
-    # ------------------------------------------------------------------
+    # Market Lab indexes scanner results by the same bare symbol the
+    # user entered. Scanner One may return the Yahoo-form symbol
+    # (e.g. ADANIPOWER.NS), so normalize the display/index key back to
+    # the Market Lab form without changing Scanner One's internal logic.
+    for record in records:
+        if isinstance(record, dict) and record.get("Symbol"):
+            record["Symbol"] = (
+                str(record["Symbol"])
+                .strip()
+                .upper()
+                .removesuffix(".NS")
+                .removesuffix(".BO")
+            )
 
     return {
         "status": "ok",
         "scanner": "scanner1",
         "as_of": timestamp.isoformat(),
         "symbols_requested": len(clean_symbols),
-
-        # Existing Scanner One Stage-1 output
-        "results_count": len(stage1_records),
-        "results": stage1_records,
-
-        # Existing Scanner One Stage-2 output
-        "ranked_results_count": len(ranked_records),
-        "ranked_results": ranked_records,
-
-        # Existing Scanner One Quality Gate rejection output
-        "rejected_results_count": len(rejected_records),
-        "rejected_results": rejected_records,
+        "results_count": len(records),
+        "results": records,
     }
 
-
-# --------------------------------------------------------------------------
-# Health check
-# --------------------------------------------------------------------------
 
 def get_scanner1_health() -> dict:
     """
     Lightweight health check.
 
-    Verifies that Scanner One's existing pipeline, quality gate and
-    ranking functions can be imported without running a full scan.
+    This lets Market Lab verify that Scanner One can be imported
+    without running a full NSE 500 scan.
     """
 
     try:
-        (
-            pipeline,
-            quality_gate,
-            rank_results,
-            default_weights,
-        ) = _find_scanner_functions()
+        pipeline = _find_pipeline_function()
 
         return {
             "status": "ok",
             "scanner": "scanner1",
             "pipeline_available": callable(pipeline),
-            "quality_gate_available": callable(quality_gate),
-            "ranking_available": callable(rank_results),
-            "default_weights_available": bool(default_weights),
         }
 
     except Exception as exc:
@@ -507,24 +333,18 @@ def get_scanner1_health() -> dict:
             "status": "error",
             "scanner": "scanner1",
             "pipeline_available": False,
-            "quality_gate_available": False,
-            "ranking_available": False,
-            "default_weights_available": False,
             "error": str(exc),
         }
 
 
-# --------------------------------------------------------------------------
-# Local test
-# --------------------------------------------------------------------------
-
 if __name__ == "__main__":
+    # Simple local test.
     print(get_scanner1_health())
 
-    # Uncomment only when you want to perform a real scan:
+    # Uncomment this only when you want to perform a real scan:
     #
     # result = run_market_lab_scan(
-    #     symbols=["ADANIPOWER"],
+    #     symbols=["INFY.NS", "TCS.NS"],
     #     as_of="2026-08-21 13:55",
     # )
     #
