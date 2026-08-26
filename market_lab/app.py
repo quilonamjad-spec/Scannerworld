@@ -7,6 +7,7 @@ from datetime import datetime, date, time
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from grid_analysis import render_grid_analysis
 
 
 # ============================================================
@@ -1236,7 +1237,42 @@ if run_button:
         for r in scanner4.get("results", [])
         if "Error" not in r
     }
+    # ========================================================
+    # GRID ANALYSIS
+    # ========================================================
 
+    if analysis_mode == "Grid Analysis":
+
+        grid_stocks = []
+
+        for symbol in SYMBOLS:
+
+            r1 = s1.get(symbol, {})
+            r2 = s2.get(symbol, {})
+            r3 = s3.get(symbol, {})
+            r4 = s4.get(symbol, {})
+
+            grid_stocks.append(
+                {
+                    "symbol": symbol,
+                    "directions": [
+                        normalize_direction(1, r1),
+                        normalize_direction(2, r2),
+                        normalize_direction(3, r3),
+                        normalize_direction(4, r4),
+                    ],
+                }
+            )
+
+        render_grid_analysis(
+            symbols=grid_stocks,
+            scanner1=s1,
+            scanner2=s2,
+            scanner3=s3,
+            scanner4=s4,
+        )
+
+        st.stop()
     # ========================================================
     # STOCK RESULTS
     # ========================================================
