@@ -247,11 +247,21 @@ def run_market_lab_scan(
 
     timestamp = _normalise_timestamp(as_of)
 
-    clean_symbols = [
-        str(symbol).strip()
-        for symbol in symbols
-        if symbol and str(symbol).strip()
-    ]
+    # Market Lab uses bare NSE symbols (e.g. ADANIPOWER), while
+    # Scanner One's existing pipeline expects Yahoo/NSE symbols with
+    # the .NS suffix. Keep the UI generic, but normalize only at this
+    # Scanner One integration boundary.
+    clean_symbols = []
+    for symbol in symbols:
+        value = str(symbol).strip().upper()
+        if not value:
+            continue
+
+        if not value.endswith(".NS") and not value.endswith(".BO"):
+            value = f"{value}.NS"
+
+        if value not in clean_symbols:
+            clean_symbols.append(value)
 
     if not clean_symbols:
         return {
@@ -276,6 +286,20 @@ def run_market_lab_scan(
     )
 
     records = _records_from_result(result)
+
+    # Market Lab indexes scanner results by the same bare symbol the
+    # user entered. Scanner One may return the Yahoo-form symbol
+    # (e.g. ADANIPOWER.NS), so normalize the display/index key back to
+    # the Market Lab form without changing Scanner One's internal logic.
+    for record in records:
+        if isinstance(record, dict) and record.get("Symbol"):
+            record["Symbol"] = (
+                str(record["Symbol"])
+                .strip()
+                .upper()
+                .removesuffix(".NS")
+                .removesuffix(".BO")
+            )
 
     return {
         "status": "ok",
