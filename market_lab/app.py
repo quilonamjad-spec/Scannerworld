@@ -6,6 +6,7 @@ from datetime import datetime, date, time
 
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
 
 
 # ============================================================
@@ -215,6 +216,152 @@ def normalize_direction(scanner_number, result):
 
     return "No Signal"
 
+def render_scanner3_chart(chart_data):
+    """
+    Render ONLY the Scanner 3 chart elements requested by Market Lab.
+
+    No Scanner 3 narrative, scores, alignment panels, or machine
+    reading are reproduced here.
+    """
+
+    if not chart_data:
+        st.warning("Chart data unavailable.")
+        return
+
+    candles = chart_data.get("candles", [])
+
+    if not candles:
+        st.warning("No chart candles available.")
+        return
+
+    chart_df = pd.DataFrame(candles)
+
+    chart_df["Time"] = pd.to_datetime(chart_df["Time"])
+
+    fig = go.Figure()
+
+    # ------------------------------------------------------------
+    # PRICE
+    # ------------------------------------------------------------
+
+    fig.add_trace(
+        go.Candlestick(
+            x=chart_df["Time"],
+            open=chart_df["Open"],
+            high=chart_df["High"],
+            low=chart_df["Low"],
+            close=chart_df["Close"],
+            name="Price",
+        )
+    )
+
+    # ------------------------------------------------------------
+    # EMA 9 / EMA 20 / VWAP
+    # ------------------------------------------------------------
+
+    for column, name in [
+        ("EMA9", "EMA 9"),
+        ("EMA20", "EMA 20"),
+        ("VWAP", "VWAP"),
+    ]:
+
+        fig.add_trace(
+            go.Scatter(
+                x=chart_df["Time"],
+                y=chart_df[column],
+                name=name,
+                mode="lines",
+            )
+        )
+
+    # ------------------------------------------------------------
+    # SUPPORT ZONE
+    # ------------------------------------------------------------
+
+    fig.add_hrect(
+        y0=chart_data["support_low"],
+        y1=chart_data["support_high"],
+        fillcolor="rgba(74,222,128,0.10)",
+        line_width=0,
+        annotation_text="Support zone",
+        annotation_position="bottom right",
+        annotation_font_color="#4ADE80",
+    )
+
+    # ------------------------------------------------------------
+    # RESISTANCE ZONE
+    # ------------------------------------------------------------
+
+    fig.add_hrect(
+        y0=chart_data["resistance_low"],
+        y1=chart_data["resistance_high"],
+        fillcolor="rgba(255,107,107,0.10)",
+        line_width=0,
+        annotation_text="Resistance zone",
+        annotation_position="top right",
+        annotation_font_color="#FF6B6B",
+    )
+
+    # ------------------------------------------------------------
+    # SUPPORT LINE
+    # ------------------------------------------------------------
+
+    fig.add_hline(
+        y=chart_data["support"],
+        annotation_text="Support",
+        line_color="#4ADE80",
+        line_width=2,
+        line_dash="dash",
+        annotation_position="bottom right",
+        annotation_font_color="#4ADE80",
+    )
+
+    # ------------------------------------------------------------
+    # RESISTANCE LINE
+    # ------------------------------------------------------------
+
+    fig.add_hline(
+        y=chart_data["resistance"],
+        annotation_text="Resistance",
+        line_color="#FF6B6B",
+        line_width=2,
+        line_dash="dash",
+        annotation_position="top right",
+        annotation_font_color="#FF6B6B",
+    )
+
+    # ------------------------------------------------------------
+    # LAYOUT
+    # ------------------------------------------------------------
+
+    fig.update_layout(
+        height=600,
+        xaxis_rangeslider_visible=False,
+        margin=dict(
+            l=10,
+            r=10,
+            t=20,
+            b=10,
+        ),
+        xaxis=dict(
+            title="Time",
+            tickformat="%H:%M",
+            showgrid=True,
+            gridcolor="rgba(130,130,130,0.16)",
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="rgba(130,130,130,0.16)",
+        ),
+        legend=dict(
+            orientation="v",
+        ),
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+    )
 
 # ============================================================
 # MACHINE READING
@@ -1111,7 +1258,22 @@ if run_button:
         )
 
         st.info(reading)
+        
+        # ========================================================
+        # CHART READING
+        # ========================================================
 
+        st.markdown("### 📈 Chart Reading")
+
+        chart_data = r3.get("Chart") if r3 else None
+
+        if chart_data:
+            render_scanner3_chart(chart_data)
+        else:
+            st.warning(
+                "Scanner 3 chart data is not available for this stock."
+            )
+            
         # ====================================================
         # UNDERLYING DATA
         # ====================================================
