@@ -117,14 +117,6 @@ def _direction_color(direction: str) -> str:
     return "#D8C7E8"
 
 
-def _direction_dot(direction: str) -> str:
-    color = _direction_color(direction)
-    return (
-        f'<span style="display:inline-block;width:15px;height:15px;'
-        f'border-radius:50%;background:{color};margin-right:8px;'
-        f'vertical-align:-2px;box-shadow:0 0 7px {color};"></span>'
-    )
-
 
 def _score_for(scanner_number: int, result: Optional[Mapping[str, Any]]) -> str:
     if not result:
@@ -224,38 +216,6 @@ def _confidence_label(value: str) -> tuple[str, str]:
     return "Low", "#FF3B4B"
 
 
-def _consensus_ring(value: str) -> str:
-    """
-    Small CSS ring for a native percentage value.
-
-    If the scanner supplies a percentage, the ring visualizes that same
-    percentage. If not, it stays blank.
-    """
-    number = _number(value)
-
-    if number is None:
-        return '<div class="ml-empty-ring"></div>'
-
-    number = max(0.0, min(100.0, number))
-
-    if number >= 70:
-        color = "#22C55E"
-    elif number >= 50:
-        color = "#FACC15"
-    else:
-        color = "#FF3B4B"
-
-    return f"""
-    <div class="ml-ring"
-         style="--pct:{number}%;--ring:{color};">
-        <span>{number:.0f}%</span>
-    </div>
-    """
-
-
-# ---------------------------------------------------------------------
-# MINI CHART
-# ---------------------------------------------------------------------
 
 def _get_chart(result: Optional[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
     if not result:
@@ -280,28 +240,19 @@ def _render_mini_chart(
     in the full Stock Selector workspace, not in this compressed grid.
     """
     if not chart_data:
-        st.markdown(
-            '<div class="ml-chart-empty">Chart data unavailable</div>',
-            unsafe_allow_html=True,
-        )
+        st.info("Chart data unavailable")
         return
 
     candles = chart_data.get("candles", [])
     if not candles:
-        st.markdown(
-            '<div class="ml-chart-empty">No chart candles available</div>',
-            unsafe_allow_html=True,
-        )
+        st.info("No chart candles available")
         return
 
     df = pd.DataFrame(candles).copy()
 
     required = {"Time", "Open", "High", "Low", "Close"}
     if not required.issubset(df.columns):
-        st.markdown(
-            '<div class="ml-chart-empty">Chart fields unavailable</div>',
-            unsafe_allow_html=True,
-        )
+        st.info("Chart fields unavailable")
         return
 
     df["Time"] = pd.to_datetime(df["Time"])
@@ -448,6 +399,11 @@ def _render_stock_card(
     card_index: int,
     render_workspace: Optional[Callable[..., Any]] = None,
 ) -> None:
+    """Render one stock card using Streamlit-native layout primitives.
+
+    No raw HTML is used for the card layout.  The existing scanner values
+    and chart are displayed as supplied by the scanner pipeline.
+    """
 
     rows = [
         ("Scanner 1", 1, r1),
@@ -457,160 +413,90 @@ def _render_stock_card(
     ]
 
     bias = _overall_direction(r1, r2, r3, r4)
-    bias_color = {
-        "Bullish": "#22C55E",
-        "Bearish": "#FF3B4B",
-        "Mixed": "#FACC15",
-    }[bias]
 
-    st.markdown(
-        f"""
-        <div class="ml-card">
-            <div class="ml-card-title">{symbol}</div>
+    # Native Streamlit card/container.
+    with st.container(border=True):
+        st.subheader(symbol)
 
-            <div style="
-                display:flex;
-                align-items:center;
-                gap:28px;
-                padding:6px 0 12px 0;
-                margin-bottom:8px;
-                border-bottom:1px solid rgba(255,255,255,0.08);
-            ">
-                <div>
-                    <div style="font-size:11px;color:#8F9BAD;letter-spacing:.4px;">
-                        RSI
-                    </div>
-                    <div style="font-size:19px;font-weight:700;color:#E8EDF5;">
-                        {_value(r4, "RSI")}
-                    </div>
-                </div>
+        # RSI and volume are common context values.  As agreed, take them
+        # from Scanner 4 rather than repeating them for every scanner.
+        top_left, top_right = st.columns(2)
+        with top_left:
+            st.metric("RSI", _value(r4, "RSI") or "—")
+        with top_right:
+            volume = _value(r4, "Vol x Avg")
+            st.metric("Volume", volume or "—")
 
-                <div>
-                    <div style="font-size:11px;color:#8F9BAD;letter-spacing:.4px;">
-                        VOLUME
-                    </div>
-                    <div style="font-size:19px;font-weight:700;color:#E8EDF5;">
-                        {_value(r4, "Vol x Avg")}
-                    </div>
-                </div>
-            </div>
+        st.divider()
 
-            <div class="ml-header-row">
-                <div class="ml-header-label"></div>
-                <div class="ml-head">Score</div>
-                <div class="ml-head">VOL / RSI</div>
-                <div class="ml-head">Confidence / Consensus</div>
-                <div class="ml-head">Direction</div>
-            </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        # Four-column scanner grid.
+        # RSI and Volume are intentionally NOT repeated here because they
+        # are already shown once at the top of the stock card from Scanner 4.
+        h = st.columns([1.15, 0.95, 1.35, 1.05])
+        h[0].caption("Scanner")
+        h[1].caption("Score / 10")
+        h[2].caption("Confidence / Consensus")
+        h[3].caption("Direction")
 
-    for scanner_name, scanner_number, result in rows:
-        cell = _scanner_cell(scanner_number, result)
-        direction = cell["direction"]
-        direction_color = _direction_color(direction)
+        for scanner_name, scanner_number, result in rows:
+            cell = _scanner_cell(scanner_number, result)
+            direction = cell["direction"]
+            score = cell["score"]
+            confidence = cell["confidence"]
 
-        confidence = cell["confidence"]
-        confidence_label = ""
-        confidence_color = "#A7B0C0"
+            c = st.columns([1.15, 0.95, 1.35, 1.05])
 
-        if confidence:
-            confidence_label, confidence_color = _confidence_label(confidence)
+            with c[0]:
+                st.write(scanner_name)
 
-        score = cell["score"]
-        volume = cell["volume"]
-        rsi = cell["rsi"]
+            with c[1]:
+                st.write(score if score else "—")
 
-        vol_rsi_html = ""
-        if volume or rsi:
-            vol_rsi_html = (
-                f'<div class="ml-small-value">'
-                f'<span>{volume}</span>'
-                f'<span>{rsi}</span>'
-                f'</div>'
-            )
+            with c[2]:
+                if confidence:
+                    label, _ = _confidence_label(confidence)
+                    st.write(f"{confidence}")
+                    if label:
+                        st.caption(label)
+                else:
+                    st.write("—")
 
-        if confidence:
-            confidence_html = f"""
-                <div class="ml-confidence-wrap">
-                    {_consensus_ring(confidence)}
-                    <div class="ml-confidence-text"
-                         style="color:{confidence_color};">
-                        {confidence_label}
-                        <span>{confidence}</span>
-                    </div>
-                </div>
-            """
+            with c[3]:
+                if direction == "Bullish":
+                    st.success("🟢 Bullish", icon="🟢")
+                elif direction == "Bearish":
+                    st.error("🔴 Bearish", icon="🔴")
+                else:
+                    st.info("⚪ No Signal" if direction == "No Signal" else "🟡 Mixed")
+
+        st.divider()
+
+        if bias == "Bullish":
+            st.success(f"Overall Bias: **{bias}**")
+        elif bias == "Bearish":
+            st.error(f"Overall Bias: **{bias}**")
         else:
-            confidence_html = '<div class="ml-blank"></div>'
+            st.warning(f"Overall Bias: **{bias}**")
 
-        st.markdown(
-            f"""
-            <div class="ml-scanner-row">
-                <div class="ml-scanner-name">{scanner_name}</div>
-
-                <div class="ml-score-cell">
-                    <div class="ml-score">
-                        {score if score else " "}
-                    </div>
-                    <div class="ml-score-line">
-                        <span style="width:0%;"></span>
-                    </div>
-                </div>
-
-                <div class="ml-vol-cell">
-                    {vol_rsi_html}
-                </div>
-
-                <div class="ml-confidence-cell">
-                    {confidence_html}
-                </div>
-
-                <div class="ml-direction"
-                     style="color:{direction_color};">
-                    {_direction_dot(direction)}
-                    {direction}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+        chart_data = _get_chart(r3)
+        _render_mini_chart(
+            chart_data,
+            chart_key=f"grid-chart-{card_index}-{symbol}",
         )
 
-    st.markdown(
-        f"""
-        <div class="ml-bias-row">
-            <span>Scanner Direction Summary</span>
-            <strong style="color:{bias_color};">{bias}</strong>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    chart_data = _get_chart(r3)
-
-    st.markdown('<div class="ml-chart-box">', unsafe_allow_html=True)
-    _render_mini_chart(
-        chart_data,
-        chart_key=f"grid-chart-{card_index}-{symbol}",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    if render_workspace is not None:
-        if st.button(
-            "🔎  Open Workspace",
-            key=f"grid-workspace-{card_index}-{symbol}",
-            use_container_width=True,
-        ):
-            render_workspace(
-                symbol=symbol,
-                r1=r1,
-                r2=r2,
-                r3=r3,
-                r4=r4,
-            )
-
-    st.markdown("</div>", unsafe_allow_html=True)
+        if render_workspace is not None:
+            if st.button(
+                "🔎 Open Workspace",
+                key=f"grid-workspace-{card_index}-{symbol}",
+                use_container_width=True,
+            ):
+                render_workspace(
+                    symbol=symbol,
+                    r1=r1,
+                    r2=r2,
+                    r3=r3,
+                    r4=r4,
+                )
 
 
 # ---------------------------------------------------------------------
@@ -618,21 +504,31 @@ def _render_stock_card(
 # ---------------------------------------------------------------------
 
 def render_grid_analysis(
-    symbols: Sequence[str],
-    s1: Mapping[str, Mapping[str, Any]],
-    s2: Mapping[str, Mapping[str, Any]],
-    s3: Mapping[str, Mapping[str, Any]],
-    s4: Mapping[str, Mapping[str, Any]],
+    symbols: Sequence[Any],
+    s1: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    s2: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    s3: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    s4: Optional[Mapping[str, Mapping[str, Any]]] = None,
     render_workspace: Optional[Callable[..., Any]] = None,
+    scanner1: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    scanner2: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    scanner3: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    scanner4: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> None:
     """
     Render the Market Lab multi-stock Grid Analysis.
 
     symbols:
-        The user-selected universe, in the same order entered.
+        The user-selected universe. The normal Market Lab input is a
+        sequence of ticker strings. For compatibility, dictionary/list
+        entries containing a symbol/ticker/name field are also accepted.
 
     s1/s2/s3/s4:
         Existing Market Lab scanner dictionaries indexed by symbol.
+
+    scanner1/scanner2/scanner3/scanner4:
+        Compatibility aliases for app.py versions that use the longer
+        scanner argument names.
 
     render_workspace:
         Optional callback supplied by app.py. If provided, the button
@@ -640,271 +536,40 @@ def render_grid_analysis(
         that logic here.
     """
 
-    st.markdown(
-        """
-        <style>
-        .ml-card {
-            background: linear-gradient(
-                145deg,
-                #0E1622 0%,
-                #0A111B 100%
-            );
-            border: 1px solid #26364A;
-            border-radius: 16px;
-            padding: 16px;
-            margin-bottom: 20px;
-            box-shadow: 0 8px 28px rgba(0,0,0,0.22);
-        }
+    # Accept either the original s1..s4 names or scanner1..scanner4.
+    s1 = s1 if s1 is not None else (scanner1 or {})
+    s2 = s2 if s2 is not None else (scanner2 or {})
+    s3 = s3 if s3 is not None else (scanner3 or {})
+    s4 = s4 if s4 is not None else (scanner4 or {})
 
-        .ml-card-title {
-            font-size: 25px;
-            font-weight: 800;
-            color: #F8FAFC;
-            margin: 0 0 12px 4px;
-        }
+    # Some app versions pass stock records rather than plain ticker
+    # strings. Normalize those records before using them as dictionary
+    # keys, preventing "unhashable type: dict".
+    if isinstance(symbols, Mapping):
+        raw_symbols = list(symbols.keys())
+    else:
+        raw_symbols = list(symbols)
 
-        .ml-header-row,
-        .ml-scanner-row {
-            display: grid;
-            grid-template-columns:
-                1.10fr
-                0.90fr
-                0.90fr
-                1.20fr
-                0.95fr;
-            align-items: stretch;
-        }
+    normalized_symbols = []
+    for item in raw_symbols:
+        if isinstance(item, Mapping):
+            candidate = (
+                item.get("symbol")
+                or item.get("Symbol")
+                or item.get("ticker")
+                or item.get("Ticker")
+                or item.get("name")
+                or item.get("Name")
+            )
+            if candidate is not None:
+                normalized_symbols.append(str(candidate))
+        else:
+            normalized_symbols.append(str(item))
 
-        .ml-head {
-            background: #163B69;
-            border: 1px solid #285A93;
-            color: #F8FAFC;
-            font-size: 14px;
-            font-weight: 700;
-            text-align: center;
-            padding: 10px 5px;
-        }
+    symbols = normalized_symbols
 
-        .ml-header-label {
-            background: transparent;
-        }
-
-        .ml-scanner-row {
-            min-height: 72px;
-            border-left: 1px solid #26364A;
-            border-right: 1px solid #26364A;
-            border-bottom: 1px solid #26364A;
-        }
-
-        .ml-scanner-row > div {
-            border-right: 1px solid #26364A;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-        }
-
-        .ml-scanner-name {
-            justify-content: flex-start !important;
-            padding-left: 12px;
-            color: #E7EEF8;
-            font-size: 15px;
-            font-weight: 600;
-        }
-
-        .ml-score-cell {
-            flex-direction: column;
-            padding: 6px 10px;
-        }
-
-        .ml-score {
-            color: #F8FAFC;
-            font-size: 20px;
-            font-weight: 800;
-            line-height: 1.15;
-            min-height: 24px;
-        }
-
-        .ml-score-line {
-            width: 86%;
-            height: 5px;
-            background: #303A46;
-            border-radius: 10px;
-            margin-top: 7px;
-            overflow: hidden;
-        }
-
-        .ml-score-line span {
-            display: block;
-            height: 100%;
-            background: #4ADE80;
-            border-radius: 10px;
-        }
-
-        .ml-vol-cell {
-            padding: 5px;
-        }
-
-        .ml-small-value {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-            color: #D8E2F0;
-            font-size: 13px;
-            line-height: 1.15;
-        }
-
-        .ml-confidence-cell {
-            padding: 5px;
-        }
-
-        .ml-confidence-wrap {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 7px;
-        }
-
-        .ml-ring {
-            width: 47px;
-            height: 47px;
-            border-radius: 50%;
-            background:
-                conic-gradient(
-                    var(--ring) var(--pct),
-                    #384352 0
-                );
-            display: grid;
-            place-items: center;
-            position: relative;
-            flex: 0 0 47px;
-        }
-
-        .ml-ring::before {
-            content: "";
-            position: absolute;
-            inset: 5px;
-            border-radius: 50%;
-            background: #101824;
-        }
-
-        .ml-ring span {
-            position: relative;
-            z-index: 1;
-            color: #F8FAFC;
-            font-size: 11px;
-            font-weight: 800;
-        }
-
-        .ml-empty-ring {
-            display: none;
-        }
-
-        .ml-confidence-text {
-            display: flex;
-            flex-direction: column;
-            font-size: 11px;
-            font-weight: 800;
-            line-height: 1.15;
-        }
-
-        .ml-confidence-text span {
-            color: #AAB6C8;
-            font-weight: 600;
-            margin-top: 2px;
-        }
-
-        .ml-direction {
-            font-size: 13px;
-            font-weight: 800;
-            white-space: nowrap;
-        }
-
-        .ml-blank {
-            min-height: 1px;
-        }
-
-        .ml-bias-row {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 18px;
-            border: 1px solid #26364A;
-            border-radius: 8px;
-            margin-top: 8px;
-            padding: 9px 12px;
-            color: #AEB9C9;
-            font-size: 13px;
-        }
-
-        .ml-bias-row strong {
-            font-size: 15px;
-        }
-
-        .ml-chart-box {
-            border: 1px solid #26364A;
-            border-radius: 10px;
-            margin-top: 10px;
-            padding: 4px 7px 0 7px;
-            background: rgba(5,12,20,0.35);
-        }
-
-        .ml-chart-empty {
-            height: 245px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #7F8CA0;
-            font-size: 13px;
-        }
-
-        @media (max-width: 1100px) {
-            .ml-header-row,
-            .ml-scanner-row {
-                grid-template-columns:
-                    0.90fr
-                    0.80fr
-                    0.75fr
-                    1.05fr
-                    0.85fr;
-            }
-
-            .ml-head {
-                font-size: 12px;
-            }
-
-            .ml-direction {
-                font-size: 11px;
-            }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        """
-        <div style="
-            margin-bottom:18px;
-        ">
-            <div style="
-                font-size:32px;
-                font-weight:800;
-                color:#F8FAFC;
-            ">
-                📊 Grid Analysis
-            </div>
-            <div style="
-                color:#93A4B8;
-                font-size:15px;
-                margin-top:3px;
-            ">
-                Real-time multi-scanner intelligence at a glance
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.title("📊 Grid Analysis")
+    st.caption("Real-time multi-scanner intelligence at a glance")
 
     symbols = list(symbols)
 
