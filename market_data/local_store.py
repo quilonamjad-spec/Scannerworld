@@ -1,13 +1,13 @@
-"""Shared local SQLite cache for 5-minute OHLCV candles.
+"""Shared local SQLite cache for intraday OHLCV candles.
 
-This is intentionally scanner-agnostic. It stores the common dataframe
-contract used by the Market Lab:
-    Open, High, Low, Close, Volume
-with an IST-aware DatetimeIndex returned by ``read_symbol``.
+The same database is shared by all scanners. Each interval has its own table
+so Scanner 1's 5-minute candles cannot be confused with Scanner 2's
+15-minute candles.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from datetime import timedelta
@@ -21,12 +21,21 @@ RETENTION_DAYS = 20
 BACKFILL_SAFETY_DAYS = 1
 
 
-def _get_conn() -> sqlite3.Connection:
+def _table(interval: str) -> str:
+    """Return a safe table name for a Yahoo interval such as 5m/15m."""
+    clean = str(interval).lower().strip()
+    if not re.fullmatch(r"\d+[mhdw]", clean):
+        raise ValueError(f"Unsupported interval: {interval}")
+    return "candles" if clean == "5m" else f"candles_{clean}"
+
+
+def _get_conn(interval: str = "5m") -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    table = _table(interval)
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS candles (
+        f"""
+        CREATE TABLE IF NOT EXISTS {table} (
             symbol TEXT NOT NULL,
             ts TEXT NOT NULL,
             open REAL, high REAL, low REAL, close REAL, volume REAL,
@@ -52,27 +61,30 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
     return out[required].dropna(subset=["Open", "High", "Low", "Close"])
 
 
-def get_symbol_max_ts(symbol: str):
-    conn = _get_conn()
+def get_symbol_max_ts(symbol: str, interval: str = "5m"):
+    conn = _get_conn(interval)
+    table = _table(interval)
     row = conn.execute(
-        "SELECT MAX(ts) FROM candles WHERE symbol = ?", (symbol,)
+        f"SELECT MAX(ts) FROM {table} WHERE symbol = ?", (symbol,)
     ).fetchone()
     conn.close()
     return None if not row or row[0] is None else pd.Timestamp(row[0])
 
 
-def get_store_max_ts():
-    conn = _get_conn()
-    row = conn.execute("SELECT MAX(ts) FROM candles").fetchone()
+def get_store_max_ts(interval: str = "5m"):
+    conn = _get_conn(interval)
+    table = _table(interval)
+    row = conn.execute(f"SELECT MAX(ts) FROM {table}").fetchone()
     conn.close()
     return None if not row or row[0] is None else pd.Timestamp(row[0])
 
 
-def upsert_bars(symbol: str, df: pd.DataFrame) -> int:
+def upsert_bars(symbol: str, df: pd.DataFrame, interval: str = "5m") -> int:
     df = _normalise(df)
     if df.empty:
         return 0
-    conn = _get_conn()
+    conn = _get_conn(interval)
+    table = _table(interval)
     rows = [
         (
             symbol,
@@ -87,7 +99,7 @@ def upsert_bars(symbol: str, df: pd.DataFrame) -> int:
     ]
     before = conn.total_changes
     conn.executemany(
-        "INSERT OR IGNORE INTO candles "
+        f"INSERT OR IGNORE INTO {table} "
         "(symbol, ts, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
@@ -97,11 +109,12 @@ def upsert_bars(symbol: str, df: pd.DataFrame) -> int:
     return inserted
 
 
-def read_symbol(symbol: str, start=None, end=None) -> pd.DataFrame:
-    conn = _get_conn()
+def read_symbol(symbol: str, start=None, end=None, interval: str = "5m") -> pd.DataFrame:
+    conn = _get_conn(interval)
+    table = _table(interval)
     query = (
-        "SELECT ts, open, high, low, close, volume "
-        "FROM candles WHERE symbol = ?"
+        f"SELECT ts, open, high, low, close, volume "
+        f"FROM {table} WHERE symbol = ?"
     )
     params = [symbol]
     if start is not None:
@@ -144,28 +157,17 @@ def _split_fresh_by_ticker(tickers: list[str], fresh: pd.DataFrame) -> dict[str,
 
 
 def update_store(tickers: list[str], period: str, interval: str = "5m") -> int:
-    """Seed missing symbols and incrementally update existing symbols.
-
-    A single Yahoo batch is used for the requested ticker set. Existing
-    symbols start from their own latest stored candle; missing symbols get
-    the full requested period. A one-day overlap makes gaps safe and the
-    primary key prevents duplicates.
-    """
+    """Seed missing symbols and incrementally update existing symbols."""
     tickers = list(dict.fromkeys(str(t) for t in tickers))
     if not tickers:
         return 0
 
-    latest = {t: get_symbol_max_ts(t) for t in tickers}
+    latest = {t: get_symbol_max_ts(t, interval=interval) for t in tickers}
     missing = [t for t in tickers if latest[t] is None]
-    existing = [t for t in tickers if latest[t] is not None]
 
-    # Yahoo's batch API has one start/period for all tickers. If any symbol is
-    # missing, use the requested period; otherwise start from the oldest
-    # latest timestamp among the requested symbols. This safely catches up
-    # every symbol while still avoiding a full re-download once all are seeded.
     if missing:
         print(
-            f"[local_store] BACKFILL — {len(missing)} symbol(s) missing; "
+            f"[local_store] BACKFILL {interval} — {len(missing)} symbol(s) missing; "
             f"fetching {period} for {len(tickers)} tickers."
         )
         fresh = yf.download(
@@ -181,7 +183,7 @@ def update_store(tickers: list[str], period: str, interval: str = "5m") -> int:
         oldest_latest = min(latest.values())
         start = (oldest_latest - pd.Timedelta(days=BACKFILL_SAFETY_DAYS)).strftime("%Y-%m-%d")
         print(
-            f"[local_store] INCREMENTAL — oldest requested symbol bar is "
+            f"[local_store] INCREMENTAL {interval} — oldest stored bar is "
             f"{oldest_latest}; fetching Yahoo since {start}."
         )
         fresh = yf.download(
@@ -195,16 +197,14 @@ def update_store(tickers: list[str], period: str, interval: str = "5m") -> int:
         )
 
     if fresh.empty:
-        print("[local_store] Yahoo returned nothing; store unchanged.")
+        print(f"[local_store] Yahoo returned nothing for {interval}; store unchanged.")
         return 0
 
     total = 0
     for ticker, frame in _split_fresh_by_ticker(tickers, fresh).items():
-        # For already-seeded symbols, keep only the incremental portion. The
-        # upsert is safe even when the one-day overlap is retained.
-        total += upsert_bars(ticker, frame)
+        total += upsert_bars(ticker, frame, interval=interval)
 
-    print(f"[local_store] {total} new bars added.")
+    print(f"[local_store] {total} new {interval} bars added.")
     return total
 
 
@@ -212,19 +212,24 @@ def prune_old(retention_days: int = RETENTION_DAYS) -> None:
     cutoff = (
         pd.Timestamp.now(tz="Asia/Kolkata") - timedelta(days=retention_days)
     ).isoformat()
-    conn = _get_conn()
-    conn.execute("DELETE FROM candles WHERE ts < ?", (cutoff,))
+    conn = _get_conn("5m")
+    for interval in ("5m", "15m", "30m", "1h"):
+        table = _table(interval)
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {table} AS SELECT * FROM candles WHERE 0") if interval != "5m" else None
+        conn.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
     conn.commit()
     conn.close()
 
 
-def store_summary() -> dict:
-    conn = _get_conn()
+def store_summary(interval: str = "5m") -> dict:
+    conn = _get_conn(interval)
+    table = _table(interval)
     row = conn.execute(
-        "SELECT COUNT(DISTINCT symbol), COUNT(*), MIN(ts), MAX(ts) FROM candles"
+        f"SELECT COUNT(DISTINCT symbol), COUNT(*), MIN(ts), MAX(ts) FROM {table}"
     ).fetchone()
     conn.close()
     return {
+        "interval": interval,
         "symbols_cached": row[0],
         "total_bars": row[1],
         "oldest_bar": row[2],
