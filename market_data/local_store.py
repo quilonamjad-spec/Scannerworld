@@ -72,12 +72,10 @@ def _get_conn(interval: str = "5m") -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     table = _table(interval)
-    conn.execute(
-        f"""CREATE TABLE IF NOT EXISTS {table} (
-            symbol TEXT NOT NULL, ts TEXT NOT NULL,
-            open REAL, high REAL, low REAL, close REAL, volume REAL,
-            PRIMARY KEY (symbol, ts))"""
-    )
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
+        symbol TEXT NOT NULL, ts TEXT NOT NULL,
+        open REAL, high REAL, low REAL, close REAL, volume REAL,
+        PRIMARY KEY (symbol, ts))""")
     return conn
 
 
@@ -115,10 +113,7 @@ def get_symbol_max_ts_batch(symbols: list[str], interval: str = "5m") -> dict[st
         return {s: (None if result.get(s) is None else pd.Timestamp(result[s])) for s in symbols}
     conn = _get_conn(interval)
     table = _table(interval)
-    rows = conn.execute(
-        f"SELECT symbol, MAX(ts) FROM {table} WHERE symbol IN ({','.join('?' for _ in symbols)}) GROUP BY symbol",
-        symbols,
-    ).fetchall()
+    rows = conn.execute(f"SELECT symbol, MAX(ts) FROM {table} WHERE symbol IN ({','.join('?' for _ in symbols)}) GROUP BY symbol", symbols).fetchall()
     conn.close()
     found = {s: (None if ts is None else pd.Timestamp(ts)) for s, ts in rows}
     return {s: found.get(s) for s in symbols}
@@ -170,6 +165,26 @@ def upsert_bars_batch(frames: dict[str, pd.DataFrame], interval: str = "5m") -> 
     return inserted
 
 
+def _frame_from_rows(rows) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    if isinstance(rows[0], (list, tuple)) and len(rows[0]) == 6:
+        df = pd.DataFrame(rows, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
+    else:
+        df = pd.DataFrame(rows)
+        if "ts" not in df.columns:
+            return pd.DataFrame()
+        df = df[["ts", "Open", "High", "Low", "Close", "Volume"]]
+    df["ts"] = pd.to_datetime(df["ts"])
+    df = df.set_index("ts")
+    df.index.name = None
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("Asia/Kolkata")
+    else:
+        df.index = df.index.tz_convert("Asia/Kolkata")
+    return df
+
+
 def read_symbol(symbol: str, start=None, end=None, interval: str = "5m") -> pd.DataFrame:
     symbol = _canonical_symbol(symbol)
     if _remote_enabled():
@@ -190,15 +205,7 @@ def read_symbol(symbol: str, start=None, end=None, interval: str = "5m") -> pd.D
     conn.close()
     if df.empty:
         return df
-    df["ts"] = pd.to_datetime(df["ts"])
-    df = df.set_index("ts")
-    df.index.name = None
-    df.columns = ["Open", "High", "Low", "Close", "Volume"]
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("Asia/Kolkata")
-    else:
-        df.index = df.index.tz_convert("Asia/Kolkata")
-    return df
+    return _frame_from_rows(df.to_dict("records"))
 
 
 def read_symbols(symbols: list[str], start=None, end=None, interval: str = "5m") -> dict[str, pd.DataFrame]:
@@ -214,18 +221,9 @@ def read_symbols(symbols: list[str], start=None, end=None, interval: str = "5m")
         result = _remote_request("POST", "/candles_batch", payload, timeout=180)
         frames = {}
         for symbol, rows in result.get("frames", {}).items():
-            if not rows:
-                continue
-            df = pd.DataFrame(rows)
-            df["ts"] = pd.to_datetime(df["ts"])
-            df = df.set_index("ts")
-            df.index.name = None
-            df = df[["Open", "High", "Low", "Close", "Volume"]]
-            if df.index.tz is None:
-                df.index = df.index.tz_localize("Asia/Kolkata")
-            else:
-                df.index = df.index.tz_convert("Asia/Kolkata")
-            frames[symbol] = df
+            frame = _frame_from_rows(rows)
+            if not frame.empty:
+                frames[symbol] = frame
         return frames
     return {s: read_symbol(s, start=start, end=end, interval=interval) for s in symbols}
 
@@ -299,9 +297,7 @@ def store_summary(interval: str = "5m") -> dict:
 
     conn = _get_conn(interval)
     table = _table(interval)
-    row = conn.execute(
-        f"SELECT COUNT(DISTINCT symbol), COUNT(*), MIN(ts), MAX(ts) FROM {table}"
-    ).fetchone()
+    row = conn.execute(f"SELECT COUNT(DISTINCT symbol), COUNT(*), MIN(ts), MAX(ts) FROM {table}").fetchone()
     conn.close()
     return {
         "interval": interval,
