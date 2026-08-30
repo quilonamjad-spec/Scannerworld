@@ -63,20 +63,35 @@ def to_yf_symbol(nse_symbol: str) -> str:
     return f"{nse_symbol.strip()}.NS"
 
 
+def _period_start(period: str) -> pd.Timestamp:
+    """Convert the Scanner 2 period argument (e.g. 5d) into a DB read start."""
+    text = str(period).strip().lower()
+    try:
+        if text.endswith("d"):
+            days = int(text[:-1])
+        elif text.endswith("h"):
+            days = max(1, int(text[:-1]) / 24)
+        else:
+            days = 5
+    except ValueError:
+        days = 5
+    return pd.Timestamp.now(tz="Asia/Kolkata") - pd.Timedelta(days=days)
+
+
 def fetch_batch(symbols, interval="15m", period="5d", pause=1.0, batch_size=50):
     """Update and read stock candles through the shared database.
 
-    ``pause`` and ``batch_size`` remain accepted for compatibility with the
-    existing Scanner 2 caller. The common store performs the Yahoo update
-    and the database read in batches, then this function returns the same
-    ``{nse_symbol: DataFrame}`` shape used by Scanner 2.
+    The update checks Yahoo for missing/incremental data, then the VM read is
+    limited to the requested period so a full historical database is never
+    returned to the Scanner 2 process.
     """
     symbols = [str(s).strip().upper() for s in symbols]
     if not symbols:
         return {}
 
     update_store(symbols, period=period, interval=interval)
-    frames = read_symbols(symbols, interval=interval)
+    start = _period_start(period)
+    frames = read_symbols(symbols, start=start, interval=interval)
 
     return {symbol.replace(".NS", ""): df for symbol, df in frames.items() if not df.empty}
 
@@ -85,8 +100,10 @@ def fetch_single(symbol, interval="15m", period="5d"):
     """Update/read one stock from the shared database."""
     symbol = str(symbol).strip().upper()
     update_store([symbol], period=period, interval=interval)
-    frames = read_symbols([symbol], interval=interval)
-    return frames.get(symbol if symbol.endswith(".NS") else f"{symbol}.NS", pd.DataFrame())
+    start = _period_start(period)
+    frames = read_symbols([symbol], start=start, interval=interval)
+    key = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+    return frames.get(key, pd.DataFrame())
 
 
 def fetch_index(index_symbol="^NSEI", interval="5m", period="5d"):
