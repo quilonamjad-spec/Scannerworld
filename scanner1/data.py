@@ -3,9 +3,9 @@ data.py
 -------
 Scanner 1 market-data layer.
 
-Stock 5-minute OHLCV is now served through the shared local SQLite cache.
-The cache seeds missing symbols from Yahoo and incrementally tops up stored
-symbols before returning the same dataframe shape expected by Scanner 1.
+Stock 5-minute OHLCV is served through the shared candle store. The shared
+store can use the local SQLite database or the VM database service without
+changing Scanner 1's analysis pipeline.
 
 Universe, sector mapping, and sector-index calculations remain unchanged.
 """
@@ -23,16 +23,14 @@ from config import (
 )
 
 try:
-    from market_data.local_store import read_symbol, update_store
+    from market_data.local_store import read_symbol, read_symbols, update_store
 except ImportError:
-    # Keeps direct execution from scanner1/working while the repository is
-    # also usable as a package from the project root.
     from pathlib import Path
     import sys
     ROOT = Path(__file__).resolve().parents[1]
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from market_data.local_store import read_symbol, update_store
+    from market_data.local_store import read_symbol, read_symbols, update_store
 
 
 # --------------------------------------------------------------------------
@@ -129,7 +127,7 @@ def compute_index_pct_changes(as_of, lookback_days: int) -> dict:
 
 
 # --------------------------------------------------------------------------
-# STOCK OHLCV FETCH — SHARED LOCAL DATABASE
+# STOCK OHLCV FETCH — SHARED CANDLE DATABASE
 # --------------------------------------------------------------------------
 def _normalise_tickers(tickers) -> list[str]:
     return [str(t).strip().upper() for t in tickers]
@@ -137,12 +135,7 @@ def _normalise_tickers(tickers) -> list[str]:
 
 def _read_batch_from_store(tickers: list[str], start_time=None, end_time=None) -> pd.DataFrame:
     """Rebuild the same yfinance-style MultiIndex batch from the shared DB."""
-    frames = {}
-    for ticker in tickers:
-        sdf = read_symbol(ticker, start=start_time, end=end_time)
-        if sdf.empty:
-            continue
-        frames[ticker] = sdf
+    frames = read_symbols(tickers, start=start_time, end=end_time, interval="5m")
 
     if not frames:
         return pd.DataFrame()
@@ -155,12 +148,12 @@ def _read_batch_from_store(tickers: list[str], start_time=None, end_time=None) -
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def fetch_batch(tickers: tuple, period: str, interval: str) -> pd.DataFrame:
-    """Update/read stock OHLCV through the shared local SQLite cache.
+    """Update/read stock OHLCV through the shared candle database.
 
     First use seeds missing symbols from Yahoo for the requested period.
     Later scans fetch only data newer than the store's existing candles,
-    then read the requested history from SQLite. The returned structure is
-    kept compatible with the original Scanner 1 pipeline.
+    then read the requested history from the database. The returned
+    structure remains compatible with the original Scanner 1 pipeline.
     """
     clean = _normalise_tickers(tickers)
     update_store(clean, period=period, interval=interval)
@@ -177,7 +170,7 @@ def fetch_symbol_5m_since(symbol_ns: str, start_time, lookback_days: int = 10) -
     necessary. The public return shape remains unchanged."""
     ticker = str(symbol_ns).strip().upper()
     update_store([ticker], period=f"{lookback_days}d", interval="5m")
-    return read_symbol(ticker, start=start_time)
+    return read_symbol(ticker, start=start_time, interval="5m")
 
 
 def get_price_at(symbol_ns: str, timestamp, lookback_days: int = 10):
@@ -188,7 +181,7 @@ def get_price_at(symbol_ns: str, timestamp, lookback_days: int = 10):
     """
     ticker = str(symbol_ns).strip().upper()
     update_store([ticker], period=f"{lookback_days}d", interval="5m")
-    df = read_symbol(ticker, end=timestamp)
+    df = read_symbol(ticker, end=timestamp, interval="5m")
     if df.empty:
         return None, None
     last = df.iloc[-1]
