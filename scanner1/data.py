@@ -1,11 +1,13 @@
 """
 data.py
 -------
-Everything that talks to Yahoo Finance or NSE's archive: the NSE 500
-universe list, sector-index constituent mapping, batched OHLCV fetches,
-and sector-index price changes. This is the one file that matters most
-if/when Yahoo gets swapped for Kite's data feed later — that change
-should only need to touch this file.
+Scanner 1 market-data layer.
+
+Stock 5-minute OHLCV is now served through the shared local SQLite cache.
+The cache seeds missing symbols from Yahoo and incrementally tops up stored
+symbols before returning the same dataframe shape expected by Scanner 1.
+
+Universe, sector mapping, and sector-index calculations remain unchanged.
 """
 
 import io
@@ -19,6 +21,18 @@ from config import (
     NSE500_URL, LOCAL_FALLBACK, IST_TZ, SECTOR_INDICES, SECTOR_PRIORITY,
     DEFAULT_SECTOR, DEFAULT_INDEX_YAHOO,
 )
+
+try:
+    from market_data.local_store import read_symbol, update_store
+except ImportError:
+    # Keeps direct execution from scanner1/working while the repository is
+    # also usable as a package from the project root.
+    from pathlib import Path
+    import sys
+    ROOT = Path(__file__).resolve().parents[1]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from market_data.local_store import read_symbol, update_store
 
 
 # --------------------------------------------------------------------------
@@ -115,22 +129,42 @@ def compute_index_pct_changes(as_of, lookback_days: int) -> dict:
 
 
 # --------------------------------------------------------------------------
-# STOCK OHLCV FETCH (batched, cached per session)
+# STOCK OHLCV FETCH — SHARED LOCAL DATABASE
 # --------------------------------------------------------------------------
+def _normalise_tickers(tickers) -> list[str]:
+    return [str(t).strip().upper() for t in tickers]
+
+
+def _read_batch_from_store(tickers: list[str], start_time=None, end_time=None) -> pd.DataFrame:
+    """Rebuild the same yfinance-style MultiIndex batch from the shared DB."""
+    frames = {}
+    for ticker in tickers:
+        sdf = read_symbol(ticker, start=start_time, end=end_time)
+        if sdf.empty:
+            continue
+        frames[ticker] = sdf
+
+    if not frames:
+        return pd.DataFrame()
+
+    if len(frames) == 1:
+        return next(iter(frames.values()))
+
+    return pd.concat(frames, axis=1)
+
+
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def fetch_batch(tickers: tuple, period: str, interval: str) -> pd.DataFrame:
-    """Batch download via yfinance. Returns a MultiIndex-columned DataFrame
-    (level 0 = ticker) so we only hit Yahoo once per batch instead of once
-    per stock."""
-    return yf.download(
-        tickers=list(tickers),
-        period=period,
-        interval=interval,
-        group_by="ticker",
-        threads=True,
-        progress=False,
-        auto_adjust=False,
-    )
+    """Update/read stock OHLCV through the shared local SQLite cache.
+
+    First use seeds missing symbols from Yahoo for the requested period.
+    Later scans fetch only data newer than the store's existing candles,
+    then read the requested history from SQLite. The returned structure is
+    kept compatible with the original Scanner 1 pipeline.
+    """
+    clean = _normalise_tickers(tickers)
+    update_store(clean, period=period, interval=interval)
+    return _read_batch_from_store(clean)
 
 
 def chunk(lst, size):
@@ -139,37 +173,22 @@ def chunk(lst, size):
 
 
 def fetch_symbol_5m_since(symbol_ns: str, start_time, lookback_days: int = 10) -> pd.DataFrame:
-    """Single-ticker fetch, IST-normalized, trimmed to bars at/after
-    start_time. Used by the trade simulation / backtest engine, which
-    needs one specific symbol's bars rather than a whole-universe batch."""
-    df = yf.download(symbol_ns, period=f"{lookback_days}d", interval="5m", progress=False, auto_adjust=False)
-    if df.empty:
-        return df
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    if df.index.tz is None:
-        df.index = df.index.tz_localize(IST_TZ)
-    else:
-        df.index = df.index.tz_convert(IST_TZ)
-    return df[df.index >= start_time]
+    """Read a single symbol from the shared store, updating it first if
+    necessary. The public return shape remains unchanged."""
+    ticker = str(symbol_ns).strip().upper()
+    update_store([ticker], period=f"{lookback_days}d", interval="5m")
+    return read_symbol(ticker, start=start_time)
 
 
 def get_price_at(symbol_ns: str, timestamp, lookback_days: int = 10):
-    """Last traded close at/before `timestamp`, from Yahoo 5-min bars.
-    Used by the trade journal to auto-fill entry/exit prices from a time
-    the user typed in, instead of asking them to look the price up
-    themselves. Returns (price, actual_bar_timestamp) or (None, None) if
-    no bar at/before `timestamp` exists in the fetched window."""
-    df = yf.download(symbol_ns, period=f"{lookback_days}d", interval="5m", progress=False, auto_adjust=False)
-    if df.empty:
-        return None, None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    if df.index.tz is None:
-        df.index = df.index.tz_localize(IST_TZ)
-    else:
-        df.index = df.index.tz_convert(IST_TZ)
-    df = df[df.index <= timestamp]
+    """Return the last stored close at/before `timestamp`.
+
+    The shared store is topped up through Yahoo before reading, so the trade
+    journal no longer needs its own independent Yahoo download.
+    """
+    ticker = str(symbol_ns).strip().upper()
+    update_store([ticker], period=f"{lookback_days}d", interval="5m")
+    df = read_symbol(ticker, end=timestamp)
     if df.empty:
         return None, None
     last = df.iloc[-1]
