@@ -1,30 +1,24 @@
 """
 data_fetch.py
 -------------
-Two jobs:
+Scanner 2 market-data layer.
 
-1. get_nifty500_list() - fetch the current Nifty500 constituent list from
-   NSE's public archive CSV. NSE blocks requests without a browser-like
-   User-Agent, so we set one. If the live fetch fails (NSE rate-limits /
-   blocks a lot of cloud IPs), we fall back to a bundled CSV
-   (data/nifty500_fallback.csv) so the app still works -- just flagged as
-   possibly stale.
+Stock intraday OHLCV is served through the shared local SQLite database.
+The database seeds missing symbols from Yahoo and incrementally tops up
+existing symbols. Scanner 2 continues to receive the same per-symbol
+DataFrames as before.
 
-2. fetch_ohlcv() / fetch_batch() - pull OHLCV candles from Yahoo Finance
-   via yfinance, in batches (Yahoo/yfinance will choke or rate-limit if
-   you hit it with 500 individual single-ticker calls).
-
-Note: Yahoo Finance data for NSE symbols is typically end-of-day accurate
-but intraday candles can lag real-time by a few minutes and are not a
-substitute for your broker/exchange terminal for actual execution.
+The Nifty 500 constituent lookup and index-data path remain unchanged.
 """
 
 import io
 import os
-import time
+
 import pandas as pd
 import requests
 import yfinance as yf
+
+from market_data.local_store import read_symbol, update_store
 
 NSE_HEADERS = {
     "User-Agent": (
@@ -46,7 +40,6 @@ def get_nifty500_list(timeout: int = 10):
     """
     try:
         session = requests.Session()
-        # NSE sometimes wants a warm-up hit to the homepage to set cookies
         session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=timeout)
         resp = session.get(NIFTY500_URL, headers=NSE_HEADERS, timeout=timeout)
         resp.raise_for_status()
@@ -56,7 +49,6 @@ def get_nifty500_list(timeout: int = 10):
     except Exception:
         pass
 
-    # Fallback to bundled (possibly stale) list
     if os.path.exists(FALLBACK_CSV):
         df = pd.read_csv(FALLBACK_CSV)
         return df, "fallback"
@@ -73,66 +65,40 @@ def to_yf_symbol(nse_symbol: str) -> str:
 
 
 def fetch_batch(symbols, interval="15m", period="5d", pause=1.0, batch_size=50):
-    """
-    Download OHLCV for a list of NSE symbols (without .NS suffix) in
-    batches using yfinance's multi-ticker download (much faster and far
-    less likely to be rate-limited than looping single downloads).
+    """Update/read stock candles through the shared local SQLite store.
 
-    interval: one of yfinance's supported intervals, e.g. "5m","15m","1h","1d"
-    period: how much history to pull. yfinance limits intraday history:
-        1m -> 7d max, 5m/15m/30m/1h -> 60d max, 1d -> years
-
-    Returns dict: {symbol: DataFrame} for symbols that returned data.
+    ``pause`` and ``batch_size`` are retained for API compatibility with the
+    original Scanner 2 caller, but the common store owns Yahoo batching now.
+    Returns the same dict shape as the original implementation:
+    ``{nse_symbol: DataFrame}``.
     """
+    symbols = [str(s).strip().upper() for s in symbols]
+    if not symbols:
+        return {}
+
+    update_store(symbols, period=period, interval=interval)
+
     results = {}
-    yf_symbols = [to_yf_symbol(s) for s in symbols]
-
-    for i in range(0, len(yf_symbols), batch_size):
-        batch = yf_symbols[i:i + batch_size]
-        try:
-            data = yf.download(
-                tickers=" ".join(batch),
-                interval=interval,
-                period=period,
-                group_by="ticker",
-                threads=True,
-                progress=False,
-                auto_adjust=False,
-            )
-        except Exception as e:
-            print(f"Batch download failed for batch starting at {i}: {e}")
-            continue
-
-        for yf_sym, orig_sym in zip(batch, symbols[i:i + batch_size]):
-            try:
-                if len(batch) == 1:
-                    df = data
-                else:
-                    df = data[yf_sym]
-                df = df.dropna(how="all")
-                if not df.empty:
-                    results[orig_sym] = df
-            except Exception:
-                continue
-
-        if i + batch_size < len(yf_symbols):
-            time.sleep(pause)  # be polite between batches
-
+    for symbol in symbols:
+        df = read_symbol(symbol, interval=interval)
+        if not df.empty:
+            results[symbol] = df
     return results
 
 
 def fetch_single(symbol, interval="15m", period="5d"):
-    """Fetch OHLCV for a single NSE symbol (without .NS suffix)."""
-    yf_sym = to_yf_symbol(symbol)
-    df = yf.Ticker(yf_sym).history(period=period, interval=interval, auto_adjust=False)
-    return df.dropna(how="all")
+    """Update/read one stock from the shared local store."""
+    symbol = str(symbol).strip().upper()
+    update_store([symbol], period=period, interval=interval)
+    return read_symbol(symbol, interval=interval)
 
 
 def fetch_index(index_symbol="^NSEI", interval="5m", period="5d"):
     """
     Fetch OHLCV for a market index (default: Nifty 50, ^NSEI). Indexes use
-    their raw Yahoo ticker directly -- NOT run through to_yf_symbol()/the
-    .NS suffix, which is only correct for individual NSE equity symbols.
+    their raw Yahoo ticker directly -- NOT the common equity candle store.
     """
-    df = yf.Ticker(index_symbol).history(period=period, interval=interval, auto_adjust=False)
+    df = yf.Ticker(index_symbol).history(
+        period=period, interval=interval, auto_adjust=False
+    )
     return df.dropna(how="all")
