@@ -22,11 +22,21 @@ BACKFILL_SAFETY_DAYS = 1
 
 
 def _table(interval: str) -> str:
-    """Return a safe table name for a Yahoo interval such as 5m/15m."""
     clean = str(interval).lower().strip()
     if not re.fullmatch(r"\d+[mhdw]", clean):
         raise ValueError(f"Unsupported interval: {interval}")
     return "candles" if clean == "5m" else f"candles_{clean}"
+
+
+def _canonical_symbol(symbol: str) -> str:
+    """Use one database/Yahoo symbol convention for NSE equities.
+
+    Scanner 1 historically passes Yahoo symbols (e.g. TCS.NS), while
+    Scanner 2 passes NSE symbols (e.g. TCS). Store both through the same
+    canonical Yahoo form so all scanners share one database cleanly.
+    """
+    value = str(symbol).strip().upper()
+    return value if value.endswith(".NS") else f"{value}.NS"
 
 
 def _get_conn(interval: str = "5m") -> sqlite3.Connection:
@@ -62,6 +72,7 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_symbol_max_ts(symbol: str, interval: str = "5m"):
+    symbol = _canonical_symbol(symbol)
     conn = _get_conn(interval)
     table = _table(interval)
     row = conn.execute(
@@ -80,21 +91,15 @@ def get_store_max_ts(interval: str = "5m"):
 
 
 def upsert_bars(symbol: str, df: pd.DataFrame, interval: str = "5m") -> int:
+    symbol = _canonical_symbol(symbol)
     df = _normalise(df)
     if df.empty:
         return 0
     conn = _get_conn(interval)
     table = _table(interval)
     rows = [
-        (
-            symbol,
-            ts.isoformat(),
-            float(row["Open"]),
-            float(row["High"]),
-            float(row["Low"]),
-            float(row["Close"]),
-            float(row["Volume"]),
-        )
+        (symbol, ts.isoformat(), float(row["Open"]), float(row["High"]),
+         float(row["Low"]), float(row["Close"]), float(row["Volume"]))
         for ts, row in df.iterrows()
     ]
     before = conn.total_changes
@@ -110,12 +115,10 @@ def upsert_bars(symbol: str, df: pd.DataFrame, interval: str = "5m") -> int:
 
 
 def read_symbol(symbol: str, start=None, end=None, interval: str = "5m") -> pd.DataFrame:
+    symbol = _canonical_symbol(symbol)
     conn = _get_conn(interval)
     table = _table(interval)
-    query = (
-        f"SELECT ts, open, high, low, close, volume "
-        f"FROM {table} WHERE symbol = ?"
-    )
+    query = f"SELECT ts, open, high, low, close, volume FROM {table} WHERE symbol = ?"
     params = [symbol]
     if start is not None:
         query += " AND ts >= ?"
@@ -158,7 +161,7 @@ def _split_fresh_by_ticker(tickers: list[str], fresh: pd.DataFrame) -> dict[str,
 
 def update_store(tickers: list[str], period: str, interval: str = "5m") -> int:
     """Seed missing symbols and incrementally update existing symbols."""
-    tickers = list(dict.fromkeys(str(t) for t in tickers))
+    tickers = list(dict.fromkeys(_canonical_symbol(t) for t in tickers))
     if not tickers:
         return 0
 
@@ -209,16 +212,13 @@ def update_store(tickers: list[str], period: str, interval: str = "5m") -> int:
 
 
 def prune_old(retention_days: int = RETENTION_DAYS) -> None:
-    cutoff = (
-        pd.Timestamp.now(tz="Asia/Kolkata") - timedelta(days=retention_days)
-    ).isoformat()
-    conn = _get_conn("5m")
+    cutoff = (pd.Timestamp.now(tz="Asia/Kolkata") - timedelta(days=retention_days)).isoformat()
     for interval in ("5m", "15m", "30m", "1h"):
+        conn = _get_conn(interval)
         table = _table(interval)
-        conn.execute(f"CREATE TABLE IF NOT EXISTS {table} AS SELECT * FROM candles WHERE 0") if interval != "5m" else None
         conn.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
 
 
 def store_summary(interval: str = "5m") -> dict:
@@ -228,10 +228,5 @@ def store_summary(interval: str = "5m") -> dict:
         f"SELECT COUNT(DISTINCT symbol), COUNT(*), MIN(ts), MAX(ts) FROM {table}"
     ).fetchone()
     conn.close()
-    return {
-        "interval": interval,
-        "symbols_cached": row[0],
-        "total_bars": row[1],
-        "oldest_bar": row[2],
-        "newest_bar": row[3],
-    }
+    return {"interval": interval, "symbols_cached": row[0], "total_bars": row[1],
+            "oldest_bar": row[2], "newest_bar": row[3]}
