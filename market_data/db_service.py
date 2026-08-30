@@ -20,11 +20,17 @@ def table_for(interval):
     raise ValueError("Unsupported interval")
 
 
+def open_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, status, data):
         raw = json.dumps(data, separators=(",", ":")).encode()
         if "gzip" in self.headers.get("Accept-Encoding", ""):
-            raw = gzip.compress(raw)
+            raw = gzip.compress(raw, compresslevel=6)
             encoding = True
         else:
             encoding = False
@@ -50,7 +56,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/summary":
                 interval = params.get("interval", ["5m"])[0]
                 table = table_for(interval)
-                with sqlite3.connect(DB_PATH) as conn:
+                with open_db() as conn:
                     row = conn.execute(f"SELECT COUNT(DISTINCT symbol), COUNT(*), MIN(ts), MAX(ts) FROM {table}").fetchone()
                 self.send_json(200, {"interval": interval, "symbols": row[0], "candles": row[1], "oldest": row[2], "newest": row[3]})
                 return
@@ -63,7 +69,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not symbol.endswith(".NS"):
                     symbol += ".NS"
                 table = table_for(interval)
-                with sqlite3.connect(DB_PATH) as conn:
+                with open_db() as conn:
                     row = conn.execute(f"SELECT MAX(ts) FROM {table} WHERE symbol = ?", (symbol,)).fetchone()
                 self.send_json(200, {"symbol": symbol, "interval": interval, "latest": row[0]})
                 return
@@ -85,7 +91,7 @@ class Handler(BaseHTTPRequestHandler):
                     query += " AND ts <= ?"
                     values.append(params["end"][0])
                 query += " ORDER BY ts"
-                with sqlite3.connect(DB_PATH) as conn:
+                with open_db() as conn:
                     rows = conn.execute(query, values).fetchall()
                 self.send_json(200, {"symbol": symbol, "interval": interval, "candles": [{"ts": r[0], "Open": r[1], "High": r[2], "Low": r[3], "Close": r[4], "Volume": r[5]} for r in rows]})
                 return
@@ -105,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = {}
                 if symbols:
                     placeholders = ",".join("?" for _ in symbols)
-                    with sqlite3.connect(DB_PATH) as conn:
+                    with open_db() as conn:
                         rows = conn.execute(f"SELECT symbol, MAX(ts) FROM {table} WHERE symbol IN ({placeholders}) GROUP BY symbol", symbols).fetchall()
                     result.update(dict(rows))
                 for symbol in symbols:
@@ -130,12 +136,15 @@ class Handler(BaseHTTPRequestHandler):
                     query += " AND ts <= ?"
                     values.append(payload["end"])
                 query += " ORDER BY symbol, ts"
-                with sqlite3.connect(DB_PATH) as conn:
+                with open_db() as conn:
                     rows = conn.execute(query, values).fetchall()
+
+                # Compact row arrays dramatically reduce JSON size and
+                # serialization overhead for a 500-symbol scan.
                 frames = {s: [] for s in symbols}
-                for r in rows:
-                    frames[r[0]].append({"ts": r[1], "Open": r[2], "High": r[3], "Low": r[4], "Close": r[5], "Volume": r[6]})
-                self.send_json(200, {"frames": frames})
+                for symbol, ts, op, hi, lo, cl, vol in rows:
+                    frames[symbol].append([ts, op, hi, lo, cl, vol])
+                self.send_json(200, {"frames": frames, "format": "compact_v1"})
                 return
             if parsed.path == "/upsert_batch":
                 interval = payload.get("interval", "5m")
@@ -147,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
                         symbol += ".NS"
                     for c in candles:
                         rows.append((symbol, c["ts"], c["Open"], c["High"], c["Low"], c["Close"], c["Volume"]))
-                with sqlite3.connect(DB_PATH) as conn:
+                with open_db() as conn:
                     before = conn.total_changes
                     if rows:
                         conn.executemany(f"INSERT OR IGNORE INTO {table} (symbol, ts, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
