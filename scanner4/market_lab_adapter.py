@@ -1,8 +1,9 @@
 """
 Market Lab adapter for Scanner 4.
 
-Uses Scanner 4's existing lib.py detection engine.
-Does NOT modify the Streamlit application.
+Uses Scanner 4's existing detection engine while routing market data through
+ the shared local candle store. The Streamlit application and detection logic
+ remain untouched.
 """
 
 import sys
@@ -10,20 +11,14 @@ from pathlib import Path
 
 import pandas as pd
 
-
 # ---------------------------------------------------------------------
 # Make Scanner 4's own modules importable.
 # ---------------------------------------------------------------------
-
 SCANNER4_DIR = Path(__file__).resolve().parent
-
 if str(SCANNER4_DIR) not in sys.path:
     sys.path.insert(0, str(SCANNER4_DIR))
 
-
 from lib import (
-    fetch_chunk_raw,
-    parse_chunk,
     add_indicators,
     smooth_edges,
     detect_pattern,
@@ -33,6 +28,8 @@ from lib import (
     detect_setups,
     compute_setup_score,
 )
+
+from market_data.local_store import read_symbol, update_store
 
 
 def run_market_lab_scan(
@@ -45,48 +42,18 @@ def run_market_lab_scan(
     """
     Run Scanner 4 independently of its Streamlit UI.
 
-    Parameters
-    ----------
-    symbols:
-        NSE symbols such as ["ADANIPOWER", "TCS"].
-
-    as_of:
-        Historical timestamp such as:
-        "2026-08-21 13:55"
-
-    period_days:
-        History used by Scanner 4.
-        Default = 5, matching the Market Scanner UI.
-
-    smooth:
-        Smooth first/last three candles.
-        Default = True, matching the Market Scanner UI.
-
-    chart_lookback:
-        Multi-bar pattern lookback.
-        Default = 60, matching the Market Scanner UI.
-
-    Returns
-    -------
-    dict
-        Structured Scanner 4 results.
+    Market data is obtained from the shared local candle store. Missing
+    candles are backfilled/incrementally updated through Yahoo by the store.
+    Scanner 4's existing detection and scoring logic is preserved.
     """
 
-    # ---------------------------------------------------------------
-    # Normalise symbols.
-    # ---------------------------------------------------------------
-
     clean_symbols = []
-
     for symbol in symbols:
         symbol = str(symbol).strip().upper()
-
         if not symbol:
             continue
-
         if not symbol.endswith(".NS"):
             symbol += ".NS"
-
         if symbol not in clean_symbols:
             clean_symbols.append(symbol)
 
@@ -98,35 +65,21 @@ def run_market_lab_scan(
             "results": [],
         }
 
-    # ---------------------------------------------------------------
-    # Parse requested date/time.
-    #
-    # Scanner 4's UI works with separate date and HH:MM values.
-    # We deliberately follow that model.
-    # ---------------------------------------------------------------
-
     cutoff = pd.Timestamp(as_of)
-
     sel_date = cutoff.date()
     sel_time = cutoff.strftime("%H:%M")
 
     results = []
 
     # ---------------------------------------------------------------
-    # Use Scanner 4's own batch downloader and parser.
+    # Shared 5-minute candle store.
     # ---------------------------------------------------------------
-
     try:
-        raw_data = fetch_chunk_raw(
-            tuple(clean_symbols),
-            period_days,
-        )
-
-        batch_raw = parse_chunk(
-            raw_data,
+        update_store(
             clean_symbols,
+            period=f"{max(int(period_days), 1)}d",
+            interval="5m",
         )
-
     except Exception as exc:
         return {
             "status": "error",
@@ -136,107 +89,61 @@ def run_market_lab_scan(
         }
 
     # ---------------------------------------------------------------
-    # Reproduce Scanner 4's process_ticker() exactly:
-    #
-    # smooth_edges
-    # add_indicators
-    # selected date
-    # selected time
-    # detect candlestick pattern
-    # detect intraday setups
-    # detect multi-bar chart pattern
-    # compute Setup Score
+    # Read the requested symbols from the common store.
     # ---------------------------------------------------------------
-
-    for ticker, raw in batch_raw.items():
-
+    batch_raw = {}
+    for ticker in clean_symbols:
         try:
+            raw = read_symbol(ticker, interval="5m")
+            if raw is not None and not raw.empty:
+                batch_raw[ticker] = raw
+        except Exception:
+            continue
 
+    # ---------------------------------------------------------------
+    # Reproduce Scanner 4's process_ticker() logic:
+    # smooth_edges -> indicators -> selected date/time -> pattern ->
+    # setups -> chart pattern -> composite Setup Score.
+    # ---------------------------------------------------------------
+    for ticker, raw in batch_raw.items():
+        try:
             if raw is None or raw.empty:
                 continue
 
             df = smooth_edges(raw, n=3) if smooth else raw
-
             df = add_indicators(df)
 
-            # Same date filtering used by Market Scanner.
             day_df = df[df.index.date == sel_date]
-
             if day_df.empty:
                 continue
 
-            # Find the latest available bar at or before
-            # the requested time.
-            times = [
-                t.strftime("%H:%M")
-                for t in day_df.index
-            ]
-
+            times = [t.strftime("%H:%M") for t in day_df.index]
             candidates = [
-                i
-                for i, tm in enumerate(times)
+                i for i, tm in enumerate(times)
                 if tm <= sel_time
             ]
-
             if not candidates:
                 continue
 
             idx = candidates[-1]
-
             sel_ts = day_df.index[idx]
-
             row = day_df.iloc[idx]
-
-            # -------------------------------------------------------
-            # Candlestick pattern
-            # -------------------------------------------------------
 
             pattern = detect_pattern(
                 day_df.reset_index(drop=True),
                 idx,
             )
+            bias, _ = PATTERN_INFO.get(pattern, ("Neutral", ""))
 
-            bias, _ = PATTERN_INFO.get(
-                pattern,
-                ("Neutral", ""),
+            prev_close = get_prev_day_close(df, sel_date)
+            setups = detect_setups(day_df, idx, prev_close)
+
+            window = day_df[day_df.index <= sel_ts].tail(chart_lookback)
+            cp = (
+                detect_chart_pattern(window.reset_index(drop=True))
+                if len(window) >= 15
+                else None
             )
-
-            # -------------------------------------------------------
-            # Previous-day context + intraday setups
-            # -------------------------------------------------------
-
-            prev_close = get_prev_day_close(
-                df,
-                sel_date,
-            )
-
-            setups = detect_setups(
-                day_df,
-                idx,
-                prev_close,
-            )
-
-            # -------------------------------------------------------
-            # Multi-bar chart pattern
-            # -------------------------------------------------------
-
-            window = (
-                day_df[
-                    day_df.index <= sel_ts
-                ]
-                .tail(chart_lookback)
-            )
-
-            if len(window) >= 15:
-                cp = detect_chart_pattern(
-                    window.reset_index(drop=True)
-                )
-            else:
-                cp = None
-
-            # -------------------------------------------------------
-            # Composite Setup Score
-            # -------------------------------------------------------
 
             score = compute_setup_score(
                 pattern,
@@ -251,36 +158,16 @@ def run_market_lab_scan(
                 for item in score["breakdown"]
             }
 
-            # -------------------------------------------------------
-            # Volume ratio
-            # -------------------------------------------------------
-
-            vol_ma = row.get(
-                "VolMA20",
-                float("nan"),
-            )
-
-            if (
-                pd.notna(vol_ma)
-                and vol_ma > 0
-            ):
-                vol_ratio = (
-                    row["Volume"] / vol_ma
-                )
+            vol_ma = row.get("VolMA20", float("nan"))
+            if pd.notna(vol_ma) and vol_ma > 0:
+                vol_ratio = row["Volume"] / vol_ma
             else:
                 vol_ratio = None
-
-            # -------------------------------------------------------
-            # Structured Market Lab result
-            # -------------------------------------------------------
 
             results.append(
                 {
                     "Ticker": ticker.replace(".NS", ""),
-                    "Close": round(
-                        row["Close"],
-                        2,
-                    ),
+                    "Close": round(row["Close"], 2),
                     "Anchor": score["anchor"],
                     "Total Score": score["total"],
                     "Score Label": (
@@ -289,46 +176,17 @@ def run_market_lab_scan(
                         else "No directional setup"
                     ),
                     "Candle Pattern": pattern,
-                    "Candle Score": breakdown.get(
-                        "Candle Strength",
-                        0,
-                    ),
-                    "Chart Pattern": (
-                        cp["name"]
-                        if cp
-                        else "None"
-                    ),
-                    "Chart Score": breakdown.get(
-                        "Multi-bar Structure",
-                        0,
-                    ),
+                    "Candle Score": breakdown.get("Candle Strength", 0),
+                    "Chart Pattern": cp["name"] if cp else "None",
+                    "Chart Score": breakdown.get("Multi-bar Structure", 0),
                     "Setup Count": len(setups),
-                    "Setups": (
-                        ", ".join(
-                            s[0]
-                            for s in setups
-                        )
-                        if setups
-                        else ""
-                    ),
-                    "RSI": round(
-                        row["RSI"],
-                        0,
-                    ),
-                    "Vol x Avg": (
-                        round(vol_ratio, 1)
-                        if vol_ratio is not None
-                        else None
-                    ),
+                    "Setups": ", ".join(s[0] for s in setups) if setups else "",
+                    "RSI": round(row["RSI"], 0),
+                    "Vol x Avg": round(vol_ratio, 1) if vol_ratio is not None else None,
                     "Time": sel_time,
                     "Bar Time": (
-                        sel_ts.strftime(
-                            "%Y-%m-%d %H:%M"
-                        )
-                        if hasattr(
-                            sel_ts,
-                            "strftime",
-                        )
+                        sel_ts.strftime("%Y-%m-%d %H:%M")
+                        if hasattr(sel_ts, "strftime")
                         else str(sel_ts)
                     ),
                     "Breakdown": breakdown,
@@ -336,27 +194,14 @@ def run_market_lab_scan(
             )
 
         except Exception as exc:
-
-            # One bad ticker must not kill the
-            # entire Market Lab scan.
             results.append(
                 {
-                    "Ticker": ticker.replace(
-                        ".NS",
-                        "",
-                    ),
-                    "Error": (
-                        f"{type(exc).__name__}: "
-                        f"{exc}"
-                    ),
+                    "Ticker": ticker.replace(".NS", ""),
+                    "Error": f"{type(exc).__name__}: {exc}",
                 }
             )
 
-    valid_results = [
-        r
-        for r in results
-        if "Error" not in r
-    ]
+    valid_results = [r for r in results if "Error" not in r]
 
     return {
         "status": "ok",
