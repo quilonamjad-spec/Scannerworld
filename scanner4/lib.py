@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from datetime import datetime, timedelta
+from market_data.local_store import update_store, read_symbol
 
 PATTERN_INFO = {
     "Bullish Marubozu": ("Bullish", "Very strong buying. Trend likely to continue up."),
@@ -63,21 +64,30 @@ CHART_PATTERN_DESC = {
 # --------------------------------------------------------------------------
 @st.cache_data(ttl=60)
 def fetch_candles(ticker: str, period_days: int) -> pd.DataFrame:
-    # Explicit start/end instead of period="Nd" — the period-based intraday
-    # request has a known Yahoo/yfinance quirk where "today" can get dropped
-    # right around session boundaries. end = tomorrow guarantees today's
-    # partial session is included regardless of local/exchange timezone.
-    end = datetime.now() + timedelta(days=1)
-    start = end - timedelta(days=period_days + 2)
-    df = yf.download(ticker, start=start, end=end, interval="5m", progress=False, auto_adjust=False)
+    """
+    Load 5-minute candles from the shared local database.
+
+    The local store handles:
+      - initial Yahoo backfill when a symbol is missing
+      - incremental Yahoo update when data already exists
+
+    Scanner 4's analysis logic remains unchanged.
+    """
+    update_store(
+        [ticker],
+        period=f"{period_days}d",
+        interval="5m",
+    )
+
+    df = read_symbol(
+        ticker,
+        interval="5m",
+    )
+
     if df.empty:
         return df
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.rename(columns=str.title)
-    df.index = pd.to_datetime(df.index)
-    return df
 
+    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def fetch_chunk_raw(tickers: tuple, period_days: int) -> pd.DataFrame:
