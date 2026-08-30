@@ -3,10 +3,9 @@ data_fetch.py
 -------------
 Scanner 2 market-data layer.
 
-Stock intraday OHLCV is served through the shared local SQLite database.
-The database seeds missing symbols from Yahoo and incrementally tops up
-existing symbols. Scanner 2 continues to receive the same per-symbol
-DataFrames as before.
+Stock intraday OHLCV is served through the shared candle store. The common
+store can use the VM database service through the SSH tunnel. Yahoo is used
+only by update_store() for missing/incremental data.
 
 The Nifty 500 constituent lookup and index-data path remain unchanged.
 """
@@ -18,7 +17,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-from market_data.local_store import read_symbol, update_store
+from market_data.local_store import read_symbols, update_store
 
 NSE_HEADERS = {
     "User-Agent": (
@@ -65,32 +64,29 @@ def to_yf_symbol(nse_symbol: str) -> str:
 
 
 def fetch_batch(symbols, interval="15m", period="5d", pause=1.0, batch_size=50):
-    """Update/read stock candles through the shared local SQLite store.
+    """Update and read stock candles through the shared database.
 
-    ``pause`` and ``batch_size`` are retained for API compatibility with the
-    original Scanner 2 caller, but the common store owns Yahoo batching now.
-    Returns the same dict shape as the original implementation:
-    ``{nse_symbol: DataFrame}``.
+    ``pause`` and ``batch_size`` remain accepted for compatibility with the
+    existing Scanner 2 caller. The common store performs the Yahoo update
+    and the database read in batches, then this function returns the same
+    ``{nse_symbol: DataFrame}`` shape used by Scanner 2.
     """
     symbols = [str(s).strip().upper() for s in symbols]
     if not symbols:
         return {}
 
     update_store(symbols, period=period, interval=interval)
+    frames = read_symbols(symbols, interval=interval)
 
-    results = {}
-    for symbol in symbols:
-        df = read_symbol(symbol, interval=interval)
-        if not df.empty:
-            results[symbol] = df
-    return results
+    return {symbol.replace(".NS", ""): df for symbol, df in frames.items() if not df.empty}
 
 
 def fetch_single(symbol, interval="15m", period="5d"):
-    """Update/read one stock from the shared local store."""
+    """Update/read one stock from the shared database."""
     symbol = str(symbol).strip().upper()
     update_store([symbol], period=period, interval=interval)
-    return read_symbol(symbol, interval=interval)
+    frames = read_symbols([symbol], interval=interval)
+    return frames.get(symbol if symbol.endswith(".NS") else f"{symbol}.NS", pd.DataFrame())
 
 
 def fetch_index(index_symbol="^NSEI", interval="5m", period="5d"):
