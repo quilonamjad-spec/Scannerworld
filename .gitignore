@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
+candle_store.db
+candle_store.db-*
+candle_store.db.backup
