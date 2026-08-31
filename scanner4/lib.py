@@ -79,8 +79,11 @@ def fetch_candles(ticker: str, period_days: int) -> pd.DataFrame:
         interval="5m",
     )
 
+    start = pd.Timestamp.now(tz="Asia/Kolkata") - pd.Timedelta(days=period_days)
+
     df = read_symbol(
         ticker,
+        start=start,
         interval="5m",
     )
 
