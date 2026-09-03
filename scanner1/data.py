@@ -3,9 +3,9 @@ data.py
 -------
 Scanner 1 market-data layer.
 
-Stock 5-minute OHLCV is served through the shared candle store. The shared
-store can use the local SQLite database or the VM database service without
-changing Scanner 1's analysis pipeline.
+Stock 5-minute OHLCV is served read-only through the shared candle store.
+Fresh candles are acquired separately by the standalone market-data updater.
+Scanner 1 does not download or update stock candles.
 
 Universe, sector mapping, and sector-index calculations remain unchanged.
 """
@@ -23,23 +23,18 @@ from config import (
 )
 
 try:
-    from market_data.local_store import read_symbol, read_symbols, update_store
+    from market_data.local_store import read_symbol, read_symbols
 except ImportError:
     from pathlib import Path
     import sys
     ROOT = Path(__file__).resolve().parents[1]
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from market_data.local_store import read_symbol, read_symbols, update_store
+    from market_data.local_store import read_symbol, read_symbols
 
 
-# --------------------------------------------------------------------------
-# UNIVERSE
-# --------------------------------------------------------------------------
 @st.cache_data(ttl=60 * 60 * 24)
 def get_nse500_symbols() -> list[str]:
-    """Fetch the current NSE 500 constituent list. Falls back to a local
-    CSV (columns must include 'Symbol') if NSE's archive is unreachable."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(NSE500_URL, headers=headers, timeout=10)
@@ -60,14 +55,8 @@ def get_nse500_symbols() -> list[str]:
     return [f"{s}.NS" for s in symbols]
 
 
-# --------------------------------------------------------------------------
-# SECTOR MAPPING & INDEX PRICES
-# --------------------------------------------------------------------------
 @st.cache_data(ttl=60 * 60 * 24)
 def get_symbol_sector_map() -> dict:
-    """symbol -> sector key (e.g. 'RELIANCE' -> 'ENERGY'). Stocks not found
-    in any sectoral list fall back to NIFTY 50 as the comparison index —
-    sectoral lists that fail to fetch are just skipped, not fatal."""
     mapping: dict = {}
     headers = {"User-Agent": "Mozilla/5.0"}
     for sector in SECTOR_PRIORITY:
@@ -92,18 +81,14 @@ def fetch_index_batch(period: str, interval: str) -> pd.DataFrame:
 
 
 def compute_index_pct_changes(as_of, lookback_days: int) -> dict:
-    """Returns {sector_key: pct_change_from_day_open} for every sector index
-    plus 'NIFTY50', evaluated at the same as_of timestamp as the stock scan."""
     yahoo_to_sector = {cfg["yahoo"]: name for name, cfg in SECTOR_INDICES.items()}
     yahoo_to_sector[DEFAULT_INDEX_YAHOO] = DEFAULT_SECTOR
     tickers = list(yahoo_to_sector.keys())
-
     changes = {}
     try:
         batch = fetch_index_batch(period=f"{lookback_days}d", interval="5m")
     except Exception:
         return changes
-
     for tkr in tickers:
         try:
             idf = batch[tkr].dropna(how="all") if len(tickers) > 1 else batch
@@ -126,37 +111,23 @@ def compute_index_pct_changes(as_of, lookback_days: int) -> dict:
     return changes
 
 
-# --------------------------------------------------------------------------
-# STOCK OHLCV FETCH — SHARED CANDLE DATABASE
-# --------------------------------------------------------------------------
 def _normalise_tickers(tickers) -> list[str]:
     return [str(t).strip().upper() for t in tickers]
 
 
 def _read_batch_from_store(tickers: list[str], start_time=None, end_time=None) -> pd.DataFrame:
-    """Rebuild the same yfinance-style MultiIndex batch from the shared DB."""
     frames = read_symbols(tickers, start=start_time, end=end_time, interval="5m")
-
     if not frames:
         return pd.DataFrame()
-
     if len(frames) == 1:
         return next(iter(frames.values()))
-
     return pd.concat(frames, axis=1)
 
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def fetch_batch(tickers: tuple, period: str, interval: str) -> pd.DataFrame:
-    """Update/read stock OHLCV through the shared candle database.
-
-    First use seeds missing symbols from Yahoo for the requested period.
-    Later scans fetch only data newer than the store's existing candles,
-    then read the requested history from the database. The returned
-    structure remains compatible with the original Scanner 1 pipeline.
-    """
+    """Read stock OHLCV from the shared DB only; never update/download."""
     clean = _normalise_tickers(tickers)
-    update_store(clean, period=period, interval=interval)
     return _read_batch_from_store(clean)
 
 
@@ -166,21 +137,14 @@ def chunk(lst, size):
 
 
 def fetch_symbol_5m_since(symbol_ns: str, start_time, lookback_days: int = 10) -> pd.DataFrame:
-    """Read a single symbol from the shared store, updating it first if
-    necessary. The public return shape remains unchanged."""
+    """Read one symbol from the shared DB without updating it."""
     ticker = str(symbol_ns).strip().upper()
-    update_store([ticker], period=f"{lookback_days}d", interval="5m")
     return read_symbol(ticker, start=start_time, interval="5m")
 
 
 def get_price_at(symbol_ns: str, timestamp, lookback_days: int = 10):
-    """Return the last stored close at/before `timestamp`.
-
-    The shared store is topped up through Yahoo before reading, so the trade
-    journal no longer needs its own independent Yahoo download.
-    """
+    """Return the last stored close at/before timestamp; DB read-only."""
     ticker = str(symbol_ns).strip().upper()
-    update_store([ticker], period=f"{lookback_days}d", interval="5m")
     df = read_symbol(ticker, end=timestamp, interval="5m")
     if df.empty:
         return None, None
