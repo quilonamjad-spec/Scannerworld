@@ -111,6 +111,9 @@ def compute_index_pct_changes(as_of, lookback_days: int) -> dict:
     return changes
 
 
+# --------------------------------------------------------------------------
+# STOCK OHLCV FETCH — READ-ONLY SHARED CANDLE DATABASE
+# --------------------------------------------------------------------------
 def _normalise_tickers(tickers) -> list[str]:
     return [str(t).strip().upper() for t in tickers]
 
@@ -126,9 +129,19 @@ def _read_batch_from_store(tickers: list[str], start_time=None, end_time=None) -
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def fetch_batch(tickers: tuple, period: str, interval: str) -> pd.DataFrame:
-    """Read stock OHLCV from the shared DB only; never update/download."""
+    """Read stock OHLCV from the shared DB only; never update/download.
+
+    Keep the same effective history window as Scanner 1's former Yahoo
+    request by limiting the DB read to the requested period. This avoids
+    transferring the entire VM database for every scan batch.
+    """
     clean = _normalise_tickers(tickers)
-    return _read_batch_from_store(clean)
+    try:
+        days = max(1, int(str(period).rstrip("d")))
+    except (TypeError, ValueError):
+        days = 15
+    start_time = pd.Timestamp.now(tz=IST_TZ) - pd.Timedelta(days=days)
+    return _read_batch_from_store(clean, start_time=start_time)
 
 
 def chunk(lst, size):
